@@ -12,6 +12,7 @@ import config
 import connections
 import db
 import geo
+import incidents
 import quarantine
 import scenarios
 
@@ -64,6 +65,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("Database unavailable, running without audit log: %s", e)
     yield
+    incidents.incident_feed.close()
     db.close()
     geo.close()
 
@@ -161,3 +163,10 @@ def audit(limit: int = 50):
 @app.get("/api/scenarios/test")
 def scenarios_test():
     return [ancestry.public_view(c) for c in scenarios.get_planted_connections()]
+
+
+@app.get("/api/incidents")
+def get_incidents():
+    snapshot = incidents.incident_feed.snapshot()
+    status = 503 if snapshot["state"] == "error" and snapshot["fetched_at"] is None else 200
+    return JSONResponse(status_code=status, content=snapshot)

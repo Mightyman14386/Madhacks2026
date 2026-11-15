@@ -63,3 +63,9 @@ PROTECTED_NAMES = frozenset({
 })
 
 ORIGIN_NAME: str =os.getenv("ORIGIN_NAME", "Madison, WI").strip() or "Madison, WI"
+
+# Read-only Databricks incident feed. Authentication stays in the SDK default flow.
+DATABRICKS_WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID", "f281300984d67642").strip()
+DATABRICKS_REFRESH_SECONDS = max(5, _int("DATABRICKS_REFRESH_SECONDS", 30))
+DATABRICKS_MAX_ROWS = max(1, min(10000, _int("DATABRICKS_MAX_ROWS", 2000)))
+DATABRICKS_QUERY_TIMEOUT = max(5, min(120, _int("DATABRICKS_QUERY_TIMEOUT", 45)))

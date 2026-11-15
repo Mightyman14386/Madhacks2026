@@ -1,3 +1,4 @@
+import {severityColor} from "./routeGeometry.js";
 export function hasCoordinates(point) {
  return point && typeof point.lat==="number" && typeof point.lng==="number" && Number.isFinite(point.lat) && Number.isFinite(point.lng) && Math.abs(point.lat)<=90 && Math.abs(point.lng)<=180;
 }
@@ -6,7 +7,7 @@ export function mergeHistory(previous,snapshot,now=Date.now()) {
  for(const c of snapshot.connections || []) next.set(c.id,{...c,observedAt:now,observedOrigin:snapshot.origin});
  return [...next.values()].sort((a,b)=>b.observedAt-a.observedAt).slice(0,2000);
 }
-export const routeColor=c=>c.status==="unsafe"?(["critical","high"].includes(c.severity)?"#e7a1ad":"#e2c28b"):"#91cbc0";
+export const routeColor=c=>c.kind==="incident"?severityColor(c.severity):c.status==="unsafe"?(["critical","high"].includes(c.severity)?"#e7a1ad":"#e2c28b"):"#91cbc0";
 export function makeDemo() {
  const origin={lat:43.0731,lng:-89.4012,name:"Madison, WI"};
  const places=[

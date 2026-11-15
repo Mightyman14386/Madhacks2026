@@ -1,0 +1,94 @@
+const fs=require("node:fs"),path=require("node:path"),assert=require("node:assert/strict");
+const bundled=path.resolve(__dirname,"../../../paste-guard/node_modules/.cache/ms-playwright");
+if(!process.env.PLAYWRIGHT_BROWSERS_PATH&&fs.existsSync(bundled))process.env.PLAYWRIGHT_BROWSERS_PATH=bundled;
+const {chromium}=require("playwright");
+(async()=>{
+ const browser=await chromium.launch({channel:"chromium",headless:true});
+ const context=await browser.newContext({viewport:{width:1440,height:1100},reducedMotion:"reduce"});
+ const page=await context.newPage(),errors=[],requests=[];
+ page.on("pageerror",e=>errors.push(e.message));page.on("request",r=>requests.push(r.url()));
+ let scenario="ready";
+ const rows=[
+  {id:"a",latitude_src:43,longitude_src:-89,latitude_dest:51,longitude_dest:0,severity:"low",ip:"203.0.113.1",description:"First shared route"},
+  {id:"b",latitude_src:43,longitude_src:-89,latitude_dest:51,longitude_dest:0,severity:"critical",ip:"203.0.113.2",description:"Second shared route"},
+  {id:"c",latitude_src:-23,longitude_src:-46,latitude_dest:40,longitude_dest:-74,severity:"medium",ip:"203.0.113.3",description:"Another origin"},
+  {id:"d",latitude_src:35,longitude_src:139,latitude_dest:1,longitude_dest:103,severity:"high",ip:"203.0.113.4",description:"Eastern route"},
+ ];
+ const ready={state:"ready",fetched_at:"2026-11-15T12:00:00Z",incidents:rows,counts:{low:1,medium:1,high:1,critical:1},warnings:[],stale:false};
+ await page.route("http://127.0.0.1:8000/**",async route=>{
+  const pathname=new URL(route.request().url()).pathname;
+  const reply=(body,status=200)=>route.fulfill({status,contentType:"application/json",body:JSON.stringify(body)});
+  if(pathname==="/api/health")return reply({status:"ok"});
+  if(pathname!=="/api/incidents")throw new Error("Unexpected endpoint in incident view: "+pathname);
+  if(scenario==="error")return reply({state:"error",fetched_at:null,message:"Could not load Databricks incidents."},503);
+  if(scenario==="stale")return reply({...ready,state:"error",stale:true,message:"Refresh failed; last snapshot retained."});
+  if(scenario==="loading")return reply({state:"loading",fetched_at:null,incidents:[],counts:{},warnings:[]});
+  if(scenario==="malformed")return reply({...ready,incidents:{bad:"shape"}});
+  if(scenario==="offline")return route.abort("connectionrefused");
+  if(scenario==="large")return reply({...ready,incidents:Array.from({length:2000},(_,i)=>({...rows[i%4],id:"large-"+i,ip:"test-endpoint-"+i})),counts:{low:500,medium:500,high:500,critical:500}});
+  if(scenario==="empty")return reply({...ready,incidents:[],counts:{}});
+  return reply(ready);
+ });
+ try{
+  await page.goto("http://localhost:5173");
+  await page.getByRole("heading",{name:"Incident routes",exact:true}).waitFor();
+  await page.getByRole("button",{name:/203.0.113.1/}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),4);
+  assert.equal(await page.getByRole("button",{name:"Request quarantine",exact:true}).count(),0);
+  assert.equal(await page.locator("canvas").count(),1);
+  assert.equal(new Set(await page.locator(".incident-severity").evaluateAll(nodes=>nodes.map(n=>getComputedStyle(n).color))).size,4);
+  fs.mkdirSync("test-results",{recursive:true});
+  await page.screenshot({path:"test-results/incidents-desktop.png",fullPage:true});
+  await page.getByRole("button",{name:/203.0.113.2/}).click();
+  const detail=await page.locator(".connection-detail").textContent();
+  for(const text of ["critical","43.000, -89.000","51.000, 0.000","Second shared route"])assert.ok(detail.includes(text),"Missing detail: "+text);
+  await page.getByRole("button",{name:"Close incident details"}).click();
+  await page.getByRole("combobox",{name:"Incident severity"}).selectOption("high");
+  assert.equal(await page.locator(".connection-row").count(),1);
+  await page.getByRole("combobox",{name:"Incident severity"}).selectOption("all");
+  await page.getByRole("textbox",{name:"Search incidents"}).fill("shared route");
+  assert.equal(await page.locator(".connection-row").count(),2);
+  await page.getByRole("textbox",{name:"Search incidents"}).fill("no match");
+  await page.getByText("No matching incidents",{exact:true}).waitFor();
+  await page.getByRole("textbox",{name:"Search incidents"}).fill("");
+  scenario="malformed";
+  await page.getByRole("alert").filter({hasText:"invalid incident response"}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),4);
+  scenario="loading";
+  await page.getByRole("alert").filter({hasText:"Backend is reconnecting"}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),4);
+  scenario="offline";
+  await page.getByRole("alert").filter({hasText:/fetch/i}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),4);
+  scenario="stale";
+  await page.getByRole("alert").filter({hasText:"Refresh failed"}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),4);
+  assert.ok((await page.getByRole("status").innerText()).includes("last successful"));
+  scenario="error";
+  await page.reload();
+  await page.getByText("Waiting for Databricks",{exact:true}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),0);
+  scenario="loading";
+  await page.reload();await page.getByText("Loading incidents",{exact:true}).waitFor();
+  scenario="empty";
+  await page.getByText("No incidents returned",{exact:true}).waitFor();
+  scenario="ready";
+  await page.getByRole("button",{name:/203.0.113.1/}).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>{const canvas=document.querySelector("canvas");if(!canvas||canvas.width!==Math.round(canvas.clientWidth*Math.min(devicePixelRatio,2)))return false;const pixels=canvas.getContext("2d").getImageData(0,0,canvas.width,canvas.height).data;let outlines=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>130&&pixels[i+1]>130&&pixels[i+2]>130&&pixels[i+3]>128)outlines++;return outlines>100;});
+  await page.screenshot({path:"test-results/incidents-mobile.png",fullPage:true});
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.locator("canvas").focus();await page.keyboard.press("ArrowRight");await page.getByRole("button",{name:"Zoom in"}).click();
+  scenario="large";
+  await page.getByRole("button",{name:/test-endpoint-1999/}).waitFor();
+  assert.equal(await page.locator(".connection-row").count(),2000);
+  await page.getByRole("textbox",{name:"Search incidents"}).fill("test-endpoint-1999");
+  assert.equal(await page.locator(".connection-row").count(),1);
+  await page.locator(".connection-row").click();
+  await page.getByRole("heading",{name:"Incident details"}).waitFor();
+  assert.ok((await page.locator(".connection-detail").textContent()).includes("test-endpoint-1999"));
+  assert.ok(!requests.some(url=>url.includes("databricks.com")));
+  assert.deepEqual(errors,[]);
+  console.log("PASS: incident default view, shared routes, four severity colors, per-row origins, details, search, filters, stale/loading/error/empty states, mobile layout, controls, backend-only Databricks access, malformed responses, backend restart retention, network outages, 2000-row filtering.");
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

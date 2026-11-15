@@ -1,5 +1,6 @@
+import {arcSampler,visibleRoutes} from "./routeGeometry";
 import {useEffect,useRef,useState} from "react";
-import {geoOrthographic,geoPath,geoGraticule10,geoInterpolate,geoRotation} from "d3-geo";
+import {geoOrthographic,geoPath,geoGraticule10,geoRotation} from "d3-geo";
 import {feature,mesh} from "topojson-client";
 import world from "world-atlas/countries-110m.json";
 import {hasCoordinates,routeColor} from "./data";
@@ -8,7 +9,7 @@ const RAD=Math.PI/180;
 export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}) {
  const canvas=useRef(null), view=useRef({rotation:[50,-20,0],zoom:1}), props=useRef(), drag=useRef(null), hits=useRef([]);
  const [hover,setHover]=useState(null);
- props.current={routes,origin,selected,onSelect,rotate};
+ props.current={routes:routes.map(r=>({...r,sample:arcSampler({...r,observedOrigin:r.observedOrigin||origin})})),origin,selected,onSelect,rotate};
  useEffect(()=>{
   const el=canvas.current,ctx=el.getContext("2d");if(!ctx)return;
   let frame,old=performance.now(),last=0,width=0,height=0;
@@ -39,18 +40,19 @@ export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}
    ctx.beginPath();path(borders);ctx.strokeStyle="#ffffff7c";ctx.lineWidth=.55;ctx.stroke();
    hits.current=[];
    function dot(p,color,size=2.5){if(p.z<0)return;ctx.save();ctx.shadowBlur=14;ctx.shadowColor=color;ctx.fillStyle=color;ctx.beginPath();ctx.arc(p.x,p.y,size,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;ctx.strokeStyle=color+"50";ctx.beginPath();ctx.arc(p.x,p.y,size+5,0,Math.PI*2);ctx.stroke();ctx.restore();}
-   const plotted=current.routes.slice(0,180);
+   const plotted=visibleRoutes(current.routes,current.selected);
    // Draw the selected connection last so it remains legible.
    plotted.sort((a,b)=>Number(a.id===current.selected)-Number(b.id===current.selected));
    for(const route of plotted){
     const home=route.observedOrigin || current.origin;
     if(!hasCoordinates(home) || !hasCoordinates(route))continue;
-    const interpolate=geoInterpolate([home.lng,home.lat],[route.lng,route.lat]);
+    const sample=route.sample;
     const color=routeColor(route),isSelected=route.id===current.selected;
-    const points=Array.from({length:65},(_,i)=>{const t=i/64;return project(interpolate(t),1+Math.sin(Math.PI*t)*.22);});
+    const points=Array.from({length:65},(_,i)=>{const t=i/64;const p=sample(t);return project(p.coord,p.elevation);});
     ctx.save();ctx.strokeStyle=color;ctx.lineWidth=isSelected?2:1.15;ctx.globalAlpha=current.selected&&!isSelected?.3:.75;ctx.shadowBlur=isSelected?12:5;ctx.shadowColor=color;ctx.beginPath();
     let pen=false;for(const p of points){if(!p.visible){pen=false;continue;}if(!pen)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);pen=true;}ctx.stroke();
-    if(!reduced){const t=((time/6500)+(route.remote_port||0)%7/7)%1;const p=project(interpolate(t),1+Math.sin(Math.PI*t)*.22);if(p.visible){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(p.x,p.y,isSelected?2.3:1.5,0,Math.PI*2);ctx.fill();}}
+    if(!reduced){const t=((time/6500)+(route.remote_port||0)%7/7)%1;const sampled=sample(t),p=project(sampled.coord,sampled.elevation);if(p.visible){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(p.x,p.y,isSelected?2.3:1.5,0,Math.PI*2);ctx.fill();}}
+    if(route.kind==="incident"){const start=project([home.lng,home.lat]);dot(start,color,isSelected?3.6:2.2);if(start.z>=0)hits.current.push({x:start.x,y:start.y,route});}
     const dest=project([route.lng,route.lat]);dot(dest,color,isSelected?3.6:2.2);
     if(dest.z>=0)hits.current.push({x:dest.x,y:dest.y,route});
     ctx.restore();
@@ -71,7 +73,7 @@ export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}
    onPointerMove={move} onPointerUp={e=>{if(drag.current&&!drag.current.moved){const [x,y]=point(e),hit=hits.current.find(h=>Math.hypot(h.x-x,h.y-y)<12);if(hit)onSelect(hit.route.id);}drag.current=null;}}
    onPointerCancel={()=>{drag.current=null;}} onPointerLeave={()=>setHover(null)}
    onKeyDown={e=>{if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","+","=","-"].includes(e.key)){e.preventDefault();setRotate(false);if(e.key.startsWith("Arrow")){view.current.rotation[0]+=(e.key==="ArrowRight"?8:e.key==="ArrowLeft"?-8:0);view.current.rotation[1]=Math.max(-85,Math.min(85,view.current.rotation[1]+(e.key==="ArrowUp"?8:e.key==="ArrowDown"?-8:0)));}else view.current.zoom=Math.max(.65,Math.min(1.45,view.current.zoom+(e.key==="-"?-.1:.1)));}}}/>
-  {hover&&<div className="globe-tooltip" style={{left:Math.min(hover.x+12,canvas.current.clientWidth-200),top:hover.y-44}}><strong>{hover.route.country_name||"Unknown location"}</strong><span>{hover.route.process_name}</span></div>}
+  {hover&&<div className="globe-tooltip" style={{left:Math.min(hover.x+12,canvas.current.clientWidth-200),top:hover.y-44}}><strong>{hover.route.kind==="incident"?hover.route.severity+" incident":hover.route.country_name||"Unknown location"}</strong><span>{hover.route.kind==="incident"?hover.route.ip:hover.route.process_name}</span></div>}
   <div className="globe-controls"><button aria-label="Zoom in" onClick={()=>view.current.zoom=Math.min(1.45,view.current.zoom+.1)}>+</button><button aria-label="Zoom out" onClick={()=>view.current.zoom=Math.max(.65,view.current.zoom-.1)}>−</button><span/><button className={rotate?"active":""} aria-pressed={rotate} onClick={()=>setRotate(!rotate)}>↻ <span>Rotate</span></button><button aria-label="Reset globe view" onClick={()=>{view.current={rotation:[50,-20,0],zoom:1};onSelect(null);}}>⌖</button></div>
   <div className="globe-instruction">DRAG TO EXPLORE <span>·</span> SELECT A CONNECTION TO FOCUS</div>
  </div>;

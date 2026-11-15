@@ -25,7 +25,7 @@ const {chromium}=require("playwright");
   return reply({detail:"Not Found"},404);
  });
  try{
-  await page.goto("http://localhost:5173");await page.getByRole("button",{name:/browser.exe United States/}).waitFor();
+  await page.goto("http://localhost:5173");await page.getByRole("button",{name:"Device traffic",exact:true}).click();await page.getByRole("button",{name:/browser.exe United States/}).waitFor();
   assert.ok((await page.locator("body").innerText()).includes("visibility may be incomplete"));
   assert.ok((await page.locator("body").innerText()).includes("truncated"));
   assert.equal(await page.locator("canvas").count(),1);
