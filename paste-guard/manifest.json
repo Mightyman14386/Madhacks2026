@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Paste Guard",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Locally replaces detected names and sensitive text before pasting into supported AI chats. No API keys required.",
   "permissions": [
     "storage",
@@ -16,7 +16,19 @@
   },
   "action": {
     "default_title": "Paste Guard",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
   },
   "options_page": "options.html",
   "content_scripts": [

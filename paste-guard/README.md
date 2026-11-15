@@ -65,6 +65,6 @@ Run synthetic checks to exercise ten bundled examples against the detector witho
 
 See COMPARISON.md for the public-source product comparison and rationale.
 
-## Unified settings (v0.6.1)
+## Unified settings (v0.6.2)
 
 Open Settings & tools from the popup or gear icon. Website rules, phrase rules, text preview, and synthetic detection checks now share one scrolling page, with sidebar links to each section. Save phrase changes before running a preview. Existing lab.html bookmarks redirect to options.html#preview. Popup cards now have consistent gaps and padding.
