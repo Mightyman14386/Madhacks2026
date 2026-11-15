@@ -8,7 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import ancestry
 import config
+import connections
+import db
 import geo
+import scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("geotrench")
@@ -48,7 +51,18 @@ async def lifespan(app: FastAPI):
     origin = geo.get_origin()
     log.info("Origin: %s (%s, %s)", origin["name"], origin["lat"], origin["lng"])
     log.info("Demo mode: %s", "ON" if config.DEMO_MODE else "OFF")
+
+    try:
+        path = db.init_db()
+        log.info("Database: %s", path)
+        removed = db.purge_older_than()
+        log.info("Retention purge (%d days): removed %s", config.RETENTION_DAYS, removed)
+        log.info("Database rows: %s", db.row_counts())
+        log.info("Blocked regions (from geofence log): %s", db.get_blocked_regions() or "none")
+    except Exception as e:
+        log.error("Database unavailable, running without audit log: %s", e)
     yield
+    db.close()
     geo.close()
 
 
@@ -102,3 +116,22 @@ def origin():
 @app.get("/api/process/test")
 def process_test(pid: int):
     return ancestry.public_view(ancestry.get_process_info(pid))
+
+
+@app.get("/api/connections")
+def get_connections():
+    return connections.get_snapshot()
+
+
+@app.get("/api/audit")
+def audit(limit: int = 50):
+    try:
+        return db.get_audit_events(limit)
+    except Exception as e:
+        log.warning("Audit read failed: %s", e)
+        return []
+
+
+@app.get("/api/scenarios/test")
+def scenarios_test():
+    return [ancestry.public_view(c) for c in scenarios.get_planted_connections()]

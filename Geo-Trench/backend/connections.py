@@ -1,0 +1,284 @@
+"""Builds the /api/connections snapshot: live outbound traffic, classified and geolocated.
+
+Never raises: failures degrade to empty lists plus a warning string.
+raw_exe and cmdline are used server-side only and are never put in the response.
+"""
+import hashlib
+import logging
+import ntpath
+import os
+import threading
+import time
+from datetime import datetime, timezone
+
+import psutil
+
+import ancestry
+import config
+import db
+import geo
+import scenarios
+from threats import classify
+
+log = logging.getLogger("geotrench.connections")
+
+MAX_CONNECTIONS = 150
+FIRST_SEEN_TTL_SECONDS = 60.0
+BLOCKED_CACHE_SECONDS = 1.0
+
+_first_seen = {}  # id -> (first_seen_iso, last_seen_monotonic)
+_first_seen_lock = threading.Lock()
+
+# Cache of db.get_blocked_regions(): (fetched_monotonic, geofence_version, regions)
+_blocked_cache = None
+_blocked_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------- blocked regions
+
+def get_blocked_regions():
+    """Current blocked regions from the geofence log. Cached 1s; any geofence append invalidates.
+
+    Raises if the database is unavailable; get_snapshot() turns that into a warning.
+    """
+    global _blocked_cache
+    with _blocked_lock:
+        now = time.monotonic()
+        version = db.geofence_version()
+        if (_blocked_cache is not None and _blocked_cache[1] == version
+                and now - _blocked_cache[0] < BLOCKED_CACHE_SECONDS):
+            return list(_blocked_cache[2])
+        regions = db.get_blocked_regions()
+        _blocked_cache = (now, version, regions)
+        return list(regions)
+
+
+# ---------------------------------------------------------------- protection
+
+def _norm_path(path):
+    try:
+        path = os.path.realpath(path)
+    except Exception:
+        pass
+    if path.startswith("\\\\?\\"):
+        path = path[4:]
+    return ntpath.normpath(path.replace("/", "\\")).casefold()
+
+
+_PROTECTED_ROOTS = tuple(ntpath.normpath(p).casefold() for p in config.PROTECTED_PATHS)
+
+
+def is_protected_process(raw_exe, pid, name):
+    """True if this process must never be quarantined or killed. Fails closed."""
+    try:
+        if pid in config.PROTECTED_PIDS or pid == os.getpid():
+            return True
+        if name and str(name).casefold() in config.PROTECTED_NAMES:
+            return True
+        if not raw_exe:
+            return True  # unknown location: fail closed
+        path = _norm_path(str(raw_exe))
+        for root in _PROTECTED_ROOTS:
+            if path == root or path.startswith(root + "\\"):
+                return True
+        return False
+    except Exception:
+        return True
+
+
+# ---------------------------------------------------------------- helpers
+
+def _conn_id(local_ip, local_port, remote_ip, remote_port, pid):
+    key = f"{local_ip}:{local_port}|{remote_ip}:{remote_port}|{pid}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _touch_first_seen(ids):
+    now_mono = time.monotonic()
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    out = {}
+    with _first_seen_lock:
+        for cid in ids:
+            first = _first_seen.get(cid, (now_iso, now_mono))[0]
+            _first_seen[cid] = (first, now_mono)
+            out[cid] = first
+        for cid in [c for c, (_, seen) in _first_seen.items() if now_mono - seen > FIRST_SEEN_TTL_SECONDS]:
+            del _first_seen[cid]
+    return out
+
+
+def _live_sockets(warnings):
+    """Return [(pid, local_ip, local_port, remote_ip, remote_port)] for public ESTABLISHED sockets."""
+    try:
+        raw = psutil.net_connections(kind="inet")
+    except psutil.AccessDenied:
+        warnings.append("Access denied listing network connections; run as Administrator.")
+        return []
+    except Exception as e:
+        warnings.append(f"Could not list network connections: {type(e).__name__}")
+        return []
+
+    out = []
+    for c in raw:
+        try:
+            if c.status != psutil.CONN_ESTABLISHED or not c.raddr or not c.pid:
+                continue
+            if geo.classify_ip(c.raddr.ip) != "public":
+                continue
+            out.append((c.pid, c.laddr.ip, c.laddr.port, c.raddr.ip, c.raddr.port))
+        except Exception:
+            continue
+    return out
+
+
+# ---------------------------------------------------------------- snapshot
+
+def get_snapshot():
+    started = time.perf_counter()
+    warnings = []
+    candidates = {}  # id -> record (dedupes identical tuples)
+
+    proc_cache = {}  # pid -> (info, is_protected), once per request
+    geo_cache = {}   # ip -> geolocate result, once per request
+
+    def proc(pid):
+        if pid not in proc_cache:
+            info = ancestry.get_process_info(pid)
+            proc_cache[pid] = (info, is_protected_process(info.get("raw_exe"), pid, info.get("name")))
+        return proc_cache[pid]
+
+    def locate(ip):
+        if ip not in geo_cache:
+            geo_cache[ip] = geo.geolocate(ip)
+        return geo_cache[ip]
+
+    # Live traffic.
+    for pid, lip, lport, rip, rport in _live_sockets(warnings):
+        cid = _conn_id(lip, lport, rip, rport, pid)
+        if cid in candidates:
+            continue
+        info, protected = proc(pid)
+        candidates[cid] = {
+            "id": cid, "pid": pid,
+            "process_name": info.get("name") or "unknown",
+            "exe": info.get("exe"),
+            "raw_exe": info.get("raw_exe"),  # server-side only; stripped below
+            "ancestry": info.get("ancestry") or ["unknown"],
+            "ancestry_detail": info.get("ancestry_detail") or [],
+            "local_ip": lip, "local_port": lport, "remote_ip": rip, "remote_port": rport,
+            "geo": locate(rip),
+            "is_protected": protected,
+            "is_simulated": False,
+        }
+
+    # Planted demo threats: same classify/is_protected path, geo from the override table.
+    try:
+        for p in scenarios.get_planted_connections():
+            cid = _conn_id(p["local_ip"], p["local_port"], p["remote_ip"], p["remote_port"], p["pid"])
+            candidates[cid] = {
+                "id": cid, "pid": p["pid"],
+                "process_name": p["process_name"],
+                "exe": p["exe"],
+                "raw_exe": p["raw_exe"],
+                "ancestry": p["ancestry"],
+                "ancestry_detail": p["ancestry_detail"],
+                "local_ip": p["local_ip"], "local_port": p["local_port"],
+                "remote_ip": p["remote_ip"], "remote_port": p["remote_port"],
+                "geo": p["geo"],
+                "is_protected": is_protected_process(p["raw_exe"], p["pid"], p["process_name"]),
+                "is_simulated": True,
+            }
+    except Exception as e:
+        warnings.append(f"Could not load demo scenarios: {type(e).__name__}")
+
+    first_seen = _touch_first_seen(candidates.keys())
+    try:
+        blocked = set(get_blocked_regions())
+    except Exception as e:
+        log.warning("Could not read blocked regions: %s", e)
+        warnings.append("Could not read blocked regions from the database; geofence not applied.")
+        blocked = set()
+
+    connections, anycast, hidden = [], [], 0
+    findings = []  # unsafe connections to record (redacted fields only)
+    for cid, rec in candidates.items():
+        verdict = classify(rec)
+        g = rec["geo"]
+        if verdict["status"] == "unsafe":
+            findings.append({
+                "id": cid, "pid": rec["pid"], "process_name": rec["process_name"],
+                "remote_ip": rec["remote_ip"], "remote_port": rec["remote_port"],
+                "country_code": (g or {}).get("country_code"), "city": (g or {}).get("city"),
+                "asn_org": (g or {}).get("asn_org"),
+                "ancestry": rec["ancestry"],
+                "rules_fired": verdict["rules_fired"], "reasons": verdict["reasons"],
+                "severity": verdict["severity"],
+                "first_seen": first_seen.get(cid),
+                "is_simulated": rec["is_simulated"],
+            })
+        if g is None:
+            continue  # no location at all: cannot place it
+        if g.get("lat") is None or g.get("lng") is None:
+            anycast.append({
+                "id": cid, "pid": rec["pid"], "process_name": rec["process_name"],
+                "remote_ip": rec["remote_ip"], "remote_port": rec["remote_port"],
+                "provider": g.get("anycast_provider"), "asn_org": g.get("asn_org"),
+                "status": verdict["status"], "severity": verdict["severity"],
+                "rules_fired": verdict["rules_fired"], "reasons": verdict["reasons"],
+            })
+            continue
+        if g.get("country_code") and g["country_code"].upper() in blocked:
+            hidden += 1
+            continue
+        connections.append({
+            "id": cid, "pid": rec["pid"], "process_name": rec["process_name"],
+            "exe": rec["exe"],
+            "ancestry": rec["ancestry"], "ancestry_detail": rec["ancestry_detail"],
+            "local_ip": rec["local_ip"], "local_port": rec["local_port"],
+            "remote_ip": rec["remote_ip"], "remote_port": rec["remote_port"],
+            "country_code": g.get("country_code"), "country_name": g.get("country_name"),
+            "city": g.get("city"), "asn_org": g.get("asn_org"),
+            "lat": g["lat"], "lng": g["lng"],
+            "status": verdict["status"], "severity": verdict["severity"],
+            "rules_fired": verdict["rules_fired"], "reasons": verdict["reasons"],
+            "is_protected": rec["is_protected"], "is_simulated": rec["is_simulated"],
+            "first_seen": first_seen.get(cid),
+        })
+
+    try:
+        for f in findings:
+            db.upsert_finding(f)
+    except Exception as e:
+        log.warning("Could not record findings: %s", e)
+        warnings.append("Could not record threat findings to the database.")
+
+    connections.sort(key=lambda c: (c["status"] != "unsafe", c["id"]))
+    anycast.sort(key=lambda c: (c["status"] != "unsafe", c["id"]))
+
+    unsafe_count = sum(1 for c in connections if c["status"] == "unsafe")
+    stats = {
+        "total": len(connections),
+        "safe": len(connections) - unsafe_count,
+        "unsafe": unsafe_count,
+        "anycast": len(anycast),
+        "hidden_by_geofence": hidden,
+        "blocked_regions": sorted(blocked),
+    }
+
+    truncated = False
+    if len(connections) > MAX_CONNECTIONS:
+        unsafe = [c for c in connections if c["status"] == "unsafe"]
+        safe = [c for c in connections if c["status"] != "unsafe"]
+        connections = unsafe + safe[: max(0, MAX_CONNECTIONS - len(unsafe))]
+        truncated = True
+
+    return {
+        "origin": geo.get_origin(),
+        "connections": connections,
+        "anycast": anycast,
+        "stats": stats,
+        "geoip_fallback": geo.geoip_is_fallback,
+        "truncated": truncated,
+        "warnings": warnings,
+        "generated_ms": round((time.perf_counter() - started) * 1000, 1),
+    }

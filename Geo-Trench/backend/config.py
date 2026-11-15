@@ -47,4 +47,19 @@ MAXMIND_CITY_PATH: Path = _path("MAXMIND_CITY_PATH", "data/GeoLite2-City.mmdb")
 MAXMIND_ASN_PATH: Path = _path("MAXMIND_ASN_PATH", "data/GeoLite2-ASN.mmdb")
 ORIGIN_LAT: float = _float("ORIGIN_LAT", 43.0731)
 ORIGIN_LNG: float = _float("ORIGIN_LNG", -89.4012)
-ORIGIN_NAME: str = os.getenv("ORIGIN_NAME", "Madison, WI").strip() or "Madison, WI"
+DB_PATH: Path = _path("DB_PATH", "geotrench.db")
+RETENTION_DAYS: int = _int("RETENTION_DAYS", 7)
+
+# Protected processes: never quarantined or killed. Unknown exe paths are treated as protected.
+PROTECTED_PATHS = (
+    r"C:\Windows",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData\Microsoft",
+)
+PROTECTED_PIDS = frozenset({0, 4})
+PROTECTED_NAMES = frozenset({
+    "explorer.exe", "svchost.exe", "lsass.exe", "csrss.exe", "wininit.exe", "services.exe", "system",
+})
+
+ORIGIN_NAME: str =os.getenv("ORIGIN_NAME", "Madison, WI").strip() or "Madison, WI"
