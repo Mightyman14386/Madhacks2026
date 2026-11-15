@@ -89,7 +89,26 @@ CREATE TABLE IF NOT EXISTS agent_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_ts ON agent_actions(ts);
 CREATE INDEX IF NOT EXISTS idx_agent_decided_ts ON agent_actions(decided_ts);
+
+-- Append-only audit events for actions that don't map 1:1 to a row (restore, integrity failures).
+-- Messages are short plain-English strings and never contain paths. Rows are never deleted.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY,
+    ts TEXT,
+    type TEXT,
+    severity TEXT,
+    message TEXT,
+    ref_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 """
+
+
+def _migrate(c):
+    """Safe additive migrations for databases created by earlier steps."""
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(quarantine_manifest)")}
+    if "restored_at" not in cols:
+        c.execute("ALTER TABLE quarantine_manifest ADD COLUMN restored_at TEXT")
 
 
 def _now():
@@ -119,6 +138,7 @@ def init_db(path=None):
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA foreign_keys=ON")
         _conn.executescript(_SCHEMA)
+        _migrate(_conn)
         _conn.commit()
         _last_write.clear()
         _geofence_version += 1
@@ -145,6 +165,7 @@ _COUNT_QUERIES = {
     "geofence_log": "SELECT COUNT(*) FROM geofence_log",
     "quarantine_manifest": "SELECT COUNT(*) FROM quarantine_manifest",
     "agent_actions": "SELECT COUNT(*) FROM agent_actions",
+    "audit_log": "SELECT COUNT(*) FROM audit_log",
 }
 
 
@@ -281,6 +302,17 @@ def get_geofence_history(limit=50):
 
 # ---------------------------------------------------------------- quarantine
 
+def list_quarantine_records(limit=200):
+    """Newest first. Omits original_path_private AND quarantine_path (folder layout is not UI business)."""
+    limit = max(1, min(int(limit), 500))
+    with _lock:
+        rows = _rows(_db().execute(
+            "SELECT id, ts, pid, process_name, original_path_redacted, sha256, status, "
+            "restored_at, is_simulated, note FROM quarantine_manifest ORDER BY id DESC LIMIT ?", (limit,)))
+    for r in rows:
+        r["sha256_short"] = (r.pop("sha256") or "")[:8]
+    return rows
+
 def add_quarantine_record(pid, process_name, original_path_redacted, original_path_private,
                           quarantine_path, sha256, status, is_simulated, note=None):
     with _lock:
@@ -302,6 +334,34 @@ def update_quarantine_status(record_id, status):
         cur = c.execute("UPDATE quarantine_manifest SET status = ? WHERE id = ?", (status, record_id))
         c.commit()
         return cur.rowcount == 1
+
+
+def mark_quarantine_restored(record_id, file_name):
+    """Set status='restored' + restored_at and append a 'Restored <file_name>' audit event, atomically.
+    Only transitions from 'quarantined'. file_name must be a bare name, never a path."""
+    with _lock:
+        c = _db()
+        now = _now()
+        cur = c.execute(
+            "UPDATE quarantine_manifest SET status = 'restored', restored_at = ? "
+            "WHERE id = ? AND status = 'quarantined'", (now, record_id))
+        if cur.rowcount != 1:
+            c.rollback()
+            return False
+        c.execute("INSERT INTO audit_log (ts, type, severity, message, ref_id) VALUES (?,?,?,?,?)",
+                  (now, "quarantine_restore", "info", f"Restored {file_name}", str(record_id)))
+        c.commit()
+        return True
+
+
+def append_audit_event(event_type, severity, message, ref_id=None):
+    """Append one audit event. message must be plain English with no paths."""
+    with _lock:
+        c = _db()
+        cur = c.execute("INSERT INTO audit_log (ts, type, severity, message, ref_id) VALUES (?,?,?,?,?)",
+                        (_now(), event_type, severity, message, None if ref_id is None else str(ref_id)))
+        c.commit()
+        return cur.lastrowid
 
 
 def get_quarantine_record(record_id, include_private=False):
@@ -415,13 +475,20 @@ def get_audit_events(limit=50):
                 "message": f"{verb} {r['country_code']}{mode}", "ref_id": str(r["id"]),
             })
         for r in c.execute("SELECT * FROM quarantine_manifest ORDER BY ts DESC LIMIT ?", (limit,)):
-            msg = {
-                "quarantined": f"Quarantined {r['process_name']}",
-                "restored": f"Restored {r['process_name']} from quarantine",
-                "dry_run": f"Simulated quarantine of {r['process_name']} (dry-run)",
-            }.get(r["status"], f"Quarantine update for {r['process_name']}")
+            if r["status"] == "dry_run" and not r["is_simulated"]:
+                msg = f"Quarantine of {r['process_name']} incomplete: process stopped, file not moved"
+            else:
+                # A restored row was still quarantined at r["ts"]; the restore itself is in audit_log.
+                msg = {
+                    "quarantined": f"Quarantined {r['process_name']}",
+                    "restored": f"Quarantined {r['process_name']}",
+                    "dry_run": f"Simulated quarantine of {r['process_name']} (dry-run)",
+                }.get(r["status"], f"Quarantine update for {r['process_name']}")
             events.append({"ts": r["ts"], "type": "quarantine", "severity": "info",
                            "message": msg, "ref_id": str(r["id"])})
+        for r in c.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)):
+            events.append({"ts": r["ts"], "type": r["type"], "severity": r["severity"],
+                           "message": r["message"], "ref_id": r["ref_id"]})
         for r in c.execute("SELECT * FROM agent_actions ORDER BY ts DESC LIMIT ?", (limit,)):
             events.append({
                 "ts": r["ts"], "type": "agent_proposed", "severity": "info",
