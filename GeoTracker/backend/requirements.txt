@@ -1,8 +1,0 @@
-fastapi
-uvicorn[standard]
-psutil
-geoip2
-python-dotenv
-pydantic
-
-databricks-sdk>=0.166,<0.167
