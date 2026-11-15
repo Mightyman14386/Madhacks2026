@@ -50,6 +50,7 @@ export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}
     const color=routeColor(route),isSelected=route.id===current.selected;
     const points=Array.from({length:65},(_,i)=>{const t=i/64;const p=sample(t);return project(p.coord,p.elevation);});
     ctx.save();ctx.strokeStyle=color;ctx.lineWidth=isSelected?2:1.15;ctx.globalAlpha=current.selected&&!isSelected?.3:.75;ctx.shadowBlur=isSelected?12:5;ctx.shadowColor=color;ctx.beginPath();
+    for(let i=1;i<points.length-1;i++){const p=points[i];if(p.visible)hits.current.push({x:p.x,y:p.y,route});}
     let pen=false;for(const p of points){if(!p.visible){pen=false;continue;}if(!pen)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);pen=true;}ctx.stroke();
     if(!reduced){const t=((time/6500)+(route.remote_port||0)%7/7)%1;const sampled=sample(t),p=project(sampled.coord,sampled.elevation);if(p.visible){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(p.x,p.y,isSelected?2.3:1.5,0,Math.PI*2);ctx.fill();}}
     if(route.kind==="incident"){const start=project([home.lng,home.lat]);dot(start,color,isSelected?3.6:2.2);if(start.z>=0)hits.current.push({x:start.x,y:start.y,route});}

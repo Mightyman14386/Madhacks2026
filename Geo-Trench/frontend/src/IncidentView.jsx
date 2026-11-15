@@ -1,3 +1,5 @@
+import ConnectionExplanation from "./ConnectionExplanation";
+import LearningGuide from "./LearningGuide";
 import {mergeIncidentSnapshot} from "./incidentSnapshot";
 import {useMemo,useState} from "react";
 import Globe from "./Globe";
@@ -17,14 +19,15 @@ export default function IncidentView(){
  const issue=feed.error||snapshot?.message;
  const status=issue?(snapshot?.fetched_at?"Showing last successful snapshot":"Connection unavailable"):snapshot?.state==="refreshing"?"Refreshing warehouse snapshot":busy?"Loading warehouse snapshot":"Warehouse snapshot";
  return <div className="incident-view">
-  <div className="page-heading"><div><div className="eyebrow"><span/> GLOBAL INCIDENT INTELLIGENCE</div><h1>Every route. <em>A wider perspective.</em></h1><p>Explore reported incidents between source and destination locations.</p></div><span className="incident-source">DATABRICKS / READ ONLY</span></div>
+  <div className="page-heading"><div><div className="eyebrow"><span/> LEARN THROUGH REPORTED ACTIVITY</div><h1>Understand the journey. <em>Build your awareness.</em></h1><p>Explore where reported activity connects, what the labels mean, and what to look into next.</p></div><span className="incident-source">DATABRICKS / READ ONLY</span></div>
   {issue&&<div className="banner error-banner" role="alert">{issue} {snapshot?.fetched_at?"The previous snapshot remains visible.":"Check the backend connection and Databricks configuration."}</div>}
   {snapshot?.warnings?.map((warning,i)=><div className="banner warning-banner" key={i}>{warning}</div>)}
+  <LearningGuide incident item={chosen} stale={!!issue}/>
   <div className="stats-grid">{[
-   ["INCIDENTS LOADED",snapshot?.fetched_at?allRoutes.length:"—","Validated source and destination"],
-   ["HIGH + CRITICAL",snapshot?.fetched_at?(counts.high||0)+(counts.critical||0):"—","Severity reported by the dataset"],
+   ["INCIDENTS LOADED",snapshot?.fetched_at?allRoutes.length:"—","Records with known locations"],
+   ["HIGH + CRITICAL",snapshot?.fetched_at?(counts.high||0)+(counts.critical||0):"—","Records marked for closer review"],
    ["ROUTES IN VIEW",snapshot?.fetched_at?routes.length:"—","Matches your current filters"],
-   ["LAST SUCCESS",snapshot?.fetched_at?new Date(snapshot.fetched_at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):"—","Warehouse snapshot time"]
+   ["LAST SUCCESS",snapshot?.fetched_at?new Date(snapshot.fetched_at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):"—","When these records were last fetched"]
   ].map(([label,value,sub])=><div className="stat" key={label}><div className="stat-label">{label}</div><strong>{value}</strong><span className="stat-sub">{sub}</span></div>)}</div>
   <div className="monitor-grid">
    <section className="globe-panel">
@@ -36,7 +39,7 @@ export default function IncidentView(){
    </section>
    <aside className="connections-panel">
     <div className="panel-heading"><div><div className="eyebrow">INCIDENT EXPLORER</div><h2>{chosen?"Incident details":"Follow a route"}</h2></div>{chosen&&<button className="icon-button" aria-label="Close incident details" onClick={()=>setSelected(null)}>×</button>}</div>
-    {chosen?<div className="connection-detail">
+    {chosen?<div className="connection-detail"><ConnectionExplanation item={chosen}/>
      <div className="detail-tags"><span className="tag" style={{color:severityColor(chosen.severity)}}>{chosen.severity}</span><span className="tag">Reported incident</span></div>
      <dl>{[
       ["Associated IP",chosen.ip||"Not provided"],

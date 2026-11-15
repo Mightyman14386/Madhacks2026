@@ -21,7 +21,7 @@ All API calls live in `src/api.js`.
 
 ## Databricks incident globe
 
-The overview defaults to **Databricks incidents**. Configure the backend OAuth
+The overview defaults to **Security insights**. Configure the backend OAuth
 credentials using [the Databricks setup guide](../backend/DATABRICKS.md). Each row
 supplies its own source and destination coordinates. Severity determines the arc
 color; repeated routes receive small stable offsets. Search by IP or description,
@@ -32,7 +32,7 @@ GET /api/incidents is polled every 3 seconds; the backend caches results and que
 the warehouse at most every 30 seconds by default while clients poll.
 
 **Device traffic** retains the existing local monitoring and quarantine workflow.
-Activity and Quarantine tabs refer to device monitoring, not Databricks incidents.
+Activity and Quarantine tabs refer to device monitoring, not Security insights.
 
 ---
 
