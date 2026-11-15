@@ -57,7 +57,7 @@ class FakeAPI:
 
 
 class FakeTable(FakeAPI):
-    """Emulates geospatial_incidents + the INSERT ... WHERE NOT EXISTS on (ip, rounded coords, device)."""
+    """Emulates geospatial_incidents + the MERGE on (ip, rounded coords, device); reports inserted rows."""
     def __init__(self):
         super().__init__()
         self.keys = set()
@@ -134,9 +134,18 @@ check("insert: coords DOUBLE, text STRING",
       (types_by_name["latitude_dest_0"], types_by_name["severity_0"], types_by_name["ip_1"]), ("DOUBLE", "STRING", "STRING"))
 check("insert: empty list -> 0, no call", (dx.insert_incidents([]), len(api.calls)), (0, 1))
 stmt = call["statement"]
-check("insert: table-side redundancy check (NOT EXISTS on ip + 4 rounded coords)",
-      ("WHERE NOT EXISTS" in stmt, "g.ip = v.ip" in stmt,
-       all(f"round(g.{c}, 4) = round(v.{c}, 4)" in stmt for c in dx.COORD_COLUMNS)), (True, True, True))
+check("insert: MERGE on ip + 4 rounded coords + device",
+      (stmt.startswith("MERGE INTO geospatial_incidents AS t"), "ON t.ip = s.ip" in stmt,
+       all(f"round(t.{c}, 4) = round(s.{c}, 4)" in stmt for c in dx.COORD_COLUMNS),
+       "endswith(t.description, :device_tag)" in stmt), (True, True, True, True))
+check("insert: matched rows update severity/description, new rows insert all 7 columns",
+      ("WHEN MATCHED THEN UPDATE SET severity = s.severity, description = s.description" in stmt,
+       f"WHEN NOT MATCHED THEN INSERT ({', '.join(dx.TABLE_COLUMNS)})" in stmt), (True, True))
+check("insert: coordinates cast to DOUBLE", "CAST(:latitude_src_0 AS DOUBLE)" in stmt, True)
+api2 = FakeAPI()
+with mock.patch.object(dx, "_client", fake_client(api2)):
+    dx.insert_incidents([row, dict(row)])
+check("insert: duplicate source rows dropped before MERGE (1 row -> 8 params)", len(api2.calls[0]["parameters"]), 8)
 check("insert: VALUES aliased as v(<all 7 columns>)", f"AS v({', '.join(dx.TABLE_COLUMNS)})" in stmt, True)
 
 with mock.patch.object(dx, "_client", fake_client(FakeAPI(fail=True))):
@@ -167,9 +176,9 @@ def fresh(name):
     dx._state.update({"exported": 0, "skipped": 0, "duplicates_skipped": 0, "last_error": None})
 
 
-def add_finding(i, simulated=False, ip=None):
+def add_finding(i, simulated=False, ip=None, process_name=None):
     db.upsert_finding({**FINDING, "id": f"f{i:011d}", "remote_ip": ip or f"1.0.{i // 200}.{i % 200 + 1}",
-                       "is_simulated": simulated})
+                       "is_simulated": simulated, "process_name": process_name or FINDING["process_name"]})
 
 
 def stamps():
@@ -240,12 +249,18 @@ try:
 
     # Redundancy inside one batch.
     fresh("redundancy")
-    for i in range(800, 803):
-        add_finding(i, ip="1.0.9.9")
+    for i in range(800, 803):  # 3 different apps, same server: 3 local findings, 1 table row (IP + coords)
+        add_finding(i, ip="1.0.9.9", process_name=f"app{i}.exe")
     table = FakeTable()
     check("redundancy: 3 findings, same IP+coords -> 1 row", sync(table), 1)
     check("redundancy: only 1 row offered to the table", len(table.calls[0]["parameters"]) // 7, 1)
     check("redundancy: all 3 stamped", all(stamps()[f"f{i:011d}"] for i in range(800, 803)), True)
+    fresh("local_dedupe")
+    for i in range(810, 813):  # same app, same server, 3 new connections: one local finding
+        add_finding(i, ip="1.0.9.10")
+        db._last_write.clear()
+    check("local dedupe: same app + IP over 3 connections -> 1 finding", db.row_counts()["threat_findings"], 1)
+    check("local dedupe: row carries the latest conn_id", list(stamps()), ["f00000000812"])
 
     # Unlocatable (e.g. anycast) findings are skipped, never sent.
     fresh("skip")

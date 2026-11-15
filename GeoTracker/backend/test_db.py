@@ -111,6 +111,47 @@ try:
           {"threat_detected", "geofence_block"} <= {e["type"] for e in events}, str([e["type"] for e in events]))
     check("Audit messages contain no paths", ":\\\\" not in msgs and "secretname" not in msgs)
     check("Audit feed sorted newest first", [e["ts"] for e in events] == sorted([e["ts"] for e in events], reverse=True))
+
+    # 7. same app + same server over new connections (new conn_id) = one finding, updated in place
+    fresh_db("dedupe")
+    a = db.upsert_finding(finding("conn00000001", remote_port=4444, severity="medium"))
+    db._last_write.clear()  # skip the 30 s write throttle
+    b = db.upsert_finding(finding("conn00000002", pid=99, remote_port=1337, severity="high"))
+    other_app = db.upsert_finding(finding("conn00000003", process_name="other.exe"))
+    other_ip = db.upsert_finding(finding("conn00000004", remote_ip="203.0.113.6"))
+    real_twin = db.upsert_finding(finding("conn00000005", is_simulated=False))
+    rows = [dict(r) for r in db._db().execute("SELECT * FROM threat_findings ORDER BY id")]
+    check("Repeat of same app + IP is not new; other app / IP / real-vs-simulated are new",
+          (a, b, other_app, other_ip, real_twin) == (True, False, True, True, True), str((a, b, other_app, other_ip, real_twin)))
+    check("4 rows, not 5", len(rows) == 4, f"{len(rows)} rows")
+    check("Repeat updated the row to the latest connection",
+          (rows[0]["conn_id"], rows[0]["pid"], rows[0]["remote_port"], rows[0]["severity"]) == ("conn00000002", 99, 1337, "high"),
+          str({k: rows[0][k] for k in ("conn_id", "pid", "remote_port", "severity")}))
+    check("Process name match ignores case",
+          db.upsert_finding(finding("conn00000006", process_name="EVIL.EXE")) is False)
+
+    # 8. migration merges duplicates already in an older database
+    path = TMP_DIR / "legacy.db"
+    import sqlite3
+    legacy = sqlite3.connect(path)
+    legacy.executescript(db._SCHEMA)
+    legacy.executescript(  # pre-dedupe rows: same app + IP three times under different conn_ids
+        "INSERT INTO threat_findings (conn_id, process_name, remote_ip, severity, first_seen, last_seen, is_simulated) VALUES "
+        "('c1','evil.exe','203.0.113.5','medium','2026-11-10T00:00:00+00:00','2026-11-10T01:00:00+00:00',0),"
+        "('c2','evil.exe','203.0.113.5','medium','2026-11-09T00:00:00+00:00','2026-11-12T00:00:00+00:00',0),"
+        "('c3','Evil.exe','203.0.113.5','high','2026-11-11T00:00:00+00:00','2026-11-11T00:00:00+00:00',0),"
+        "('c4','good.exe','203.0.113.5','low','2026-11-11T00:00:00+00:00','2026-11-11T00:00:00+00:00',0);")
+    legacy.commit()
+    legacy.close()
+    db.init_db(path)
+    rows = [dict(r) for r in db._db().execute("SELECT conn_id, first_seen, last_seen FROM threat_findings ORDER BY id")]
+    check("Migration merged 3 duplicates into the first row, kept the other app",
+          [r["conn_id"] for r in rows] == ["c1", "c4"], str(rows))
+    check("Merged row spans earliest first_seen to latest last_seen",
+          (rows[0]["first_seen"], rows[0]["last_seen"]) == ("2026-11-09T00:00:00+00:00", "2026-11-12T00:00:00+00:00"), str(rows[0]))
+    db.close()
+    db.init_db(path)  # running the migration again changes nothing
+    check("Migration is idempotent", db.row_counts()["threat_findings"] == 2)
 finally:
     db.close()
     shutil.rmtree(TMP_DIR, ignore_errors=True)

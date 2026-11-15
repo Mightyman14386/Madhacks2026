@@ -2,9 +2,9 @@
 
 - to_incident_row(): pure mapping from one finding to the table's 7 columns. Path-free; never
   includes raw_exe, exe paths, cmdline, local IPs, or ancestry paths.
-- insert_incidents(): one parameterized multi-row INSERT (named parameters, no string-formatted values).
+- insert_incidents(): one parameterized multi-row MERGE (named parameters, no string-formatted values).
 - A single background worker reconciles like a sync job: every pass scans ALL local findings and the
-  INSERT ... WHERE NOT EXISTS lets the warehouse add only rows whose IP + coordinates it doesn't have.
+  MERGE inserts rows whose IP + coordinates it doesn't have and refreshes severity/description on the rest.
   Rows deleted/truncated in Databricks are re-added on the next pass; existing rows are never duplicated.
   Passes run every DATABRICKS_EXPORT_SECONDS and immediately when a new finding appears.
   /api/connections never waits on the warehouse.
@@ -102,24 +102,27 @@ def dedupe_rows(rows):
 
 def _build_statement(rows):
     """Return (sql, [(name, value, type)]). Values only ever travel as named parameters.
-    The table-side NOT EXISTS skips rows whose IP + coordinates are already in geospatial_incidents."""
+    MERGE on IP + the 4 coordinates (rounded) + this device: an existing row gets the latest
+    severity/description, a new route is inserted. Rows must already be deduped by dedupe_key,
+    otherwise two source rows could match one table row (a MERGE error)."""
     tuples, params = [], []
     for i, row in enumerate(rows):
         names = []
         for col in TABLE_COLUMNS:
             name = f"{col}_{i}"
-            names.append(":" + name)
             is_coord = col.startswith(("latitude", "longitude"))
+            names.append(f"CAST(:{name} AS DOUBLE)" if is_coord else ":" + name)
             params.append((name, str(row[col]), "DOUBLE" if is_coord else "STRING"))
         tuples.append("(" + ", ".join(names) + ")")
     params.append(("device_tag", device_tag(), "STRING"))
     cols = ", ".join(TABLE_COLUMNS)
     same_point = " AND ".join(
-        f"round(g.{c}, {COORD_DECIMALS}) = round(v.{c}, {COORD_DECIMALS})" for c in COORD_COLUMNS)
-    sql = (f"INSERT INTO geospatial_incidents ({cols}) "
-           f"SELECT {cols} FROM VALUES {', '.join(tuples)} AS v({cols}) "
-           f"WHERE NOT EXISTS (SELECT 1 FROM geospatial_incidents g WHERE g.ip = v.ip AND {same_point} "
-           f"AND endswith(g.description, :device_tag))")
+        f"round(t.{c}, {COORD_DECIMALS}) = round(s.{c}, {COORD_DECIMALS})" for c in COORD_COLUMNS)
+    sql = (f"MERGE INTO geospatial_incidents AS t "
+           f"USING (SELECT {cols} FROM VALUES {', '.join(tuples)} AS v({cols})) AS s "
+           f"ON t.ip = s.ip AND {same_point} AND endswith(t.description, :device_tag) "
+           f"WHEN MATCHED THEN UPDATE SET severity = s.severity, description = s.description "
+           f"WHEN NOT MATCHED THEN INSERT ({cols}) VALUES ({', '.join('s.' + c for c in TABLE_COLUMNS)})")
     return sql, params
 
 
@@ -133,11 +136,11 @@ def _inserted_count(resp):
 
 
 def insert_incidents(rows, wait_timeout="30s"):
-    """Insert rows the table doesn't already have, with one parameterized statement.
+    """MERGE rows into the table (insert new routes, update existing ones) with one parameterized statement.
     Returns the number actually inserted (num_inserted_rows; len(rows) if not reported),
     or None on failure. Never raises."""
     global _client
-    rows = list(rows or [])
+    rows, _ = dedupe_rows(list(rows or []))  # MERGE needs at most one source row per target row
     if not rows:
         return 0
     try:

@@ -6,6 +6,8 @@ import GeofencePanel from "./GeofencePanel";
 import QuarantineList from "./QuarantineList";
 import RuleLessons from "./RuleLessons";
 import OpNarration from "./OpNarration";
+import ExploreInsights from "./ExploreInsights";
+import LearnMore from "./LearnMore";
 import {LiveOpsProvider} from "./liveOps";
 import usePoll from "./usePoll";
 import {useEffect,useMemo,useRef,useState} from "react";
@@ -98,6 +100,8 @@ export default function App() {
       <dl>{[["Location",location(selectedConnection)],["Provider",selectedConnection.asn_org||selectedConnection.provider||"Unknown"],["Remote endpoint",selectedConnection.remote_ip+":"+selectedConnection.remote_port],["First seen",time(selectedConnection.first_seen)]].map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>
       <ProcessAncestry chain={selectedConnection.ancestry} rules={selectedConnection.rules_fired}/><h4>WHY THIS WAS FLAGGED</h4>{selectedConnection.reasons?.length?<ul className="reasons">{selectedConnection.reasons.map((r,i)=><li key={i}>{r}</li>)}</ul>:<p className="muted">No reasons were returned for this connection.</p>}
       <RuleLessons item={selectedConnection}/>
+      <ExploreInsights items={selectedConnection.insights}/>
+      <LearnMore item={selectedConnection} origin={selectedConnection.observedOrigin||data?.origin}/>
       {action&&<div className={"action-result "+action.type} role="status">{action.message}</div>}
       <OpNarration match={{conn_id:selectedConnection.id}}/>
       <button className="button quarantine-button" disabled={demo||busy||period==="recent"} onClick={()=>setConfirm(true)}><Icon name={selectedConnection.is_protected?"lock":"shield"} size={15}/>{demo?"Preview — actions disabled":period==="recent"?"Select latest check to act":"Request quarantine"}</button><p className="micro">The backend re-checks protection and process identity. {selectedConnection.is_protected?"Protected processes can be refused with a Safety Override.":""}</p>

@@ -82,7 +82,9 @@ Use this to enable or disable UI controls.
     "country_code": "US", "country_name": "United States", "city": null, "asn_org": "Google LLC",
     "lat": 37.751, "lng": -97.822,
     "status": "safe", "severity": "low", "rules_fired": [], "reasons": [],
-    "is_protected": true, "is_simulated": false, "first_seen": "2026-11-15T04:22:36+00:00"
+    "is_protected": true, "is_simulated": false, "first_seen": "2026-11-15T04:22:36+00:00",
+    "insights": [{ "id": "owner", "title": "Who runs this server?", "text": "...",
+                   "command": "Resolve-DnsName '142.250.80.46' -Type PTR -ErrorAction SilentlyContinue" }]
   }],
   "anycast": [{ "id": "...", "pid": 0, "process_name": "...", "remote_ip": "1.1.1.1", "remote_port": 443,
                 "provider": "Cloudflare DNS", "asn_org": "Cloudflare, Inc.",
@@ -95,6 +97,7 @@ Use this to enable or disable UI controls.
 - `id` is stable across polls; use it as the React key and as `conn_id` in actions.
 - Connections to geofenced countries are removed and counted in `stats.hidden_by_geofence`.
 - `city` is often `null` (country-level location). Anycast endpoints have no coordinates and are in `anycast`.
+- `insights` (on `connections` and `anycast`): deterministic "explore further" tips from `insights.py`, ids `same_app`, `same_destination`, `owner`, `port`, `parent`, `signature`, `hash`, `live`, `first_seen`, `simulated`. `command` is optional: a read-only PowerShell line for the user to copy and run; the server never runs it. Built only from fields already in this response (user paths appear as `$env:USERPROFILE`). Simulated connections get no commands.
 
 #### 🔎 `GET /api/audit?limit=50` (max 500)
 Newest-first list of `{ts, type, severity, message, ref_id}`. Types: `threat_detected`, `quarantine`, `quarantine_restore`, `quarantine_integrity`, `geofence_block`, `geofence_unblock`, `geofence_update`, `geofence_failed`, `geofence_orphan`, `agent_proposed`, `agent_decision`.

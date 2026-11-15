@@ -19,7 +19,7 @@ FINDING_UPDATE_THROTTLE_SECONDS = 30.0
 _lock = threading.RLock()
 _conn = None
 _db_path = None
-_last_write = {}        # conn_id -> monotonic time of last DB write (throttle)
+_last_write = {}        # finding_key -> monotonic time of last DB write (throttle)
 _geofence_version = 0   # bumped on every geofence append; readers use it to invalidate caches
 
 _SCHEMA = """
@@ -119,6 +119,22 @@ def _migrate(c):
     if "exported_at" not in tf_cols:
         c.execute("ALTER TABLE threat_findings ADD COLUMN exported_at TEXT")
 
+    # One finding per app + remote IP (+ simulated flag). conn_id changes with every new local port,
+    # so keying on it stored the same app/server pair again and again (the duplication seen in Databricks).
+    if "finding_key" not in tf_cols:
+        c.execute("ALTER TABLE threat_findings ADD COLUMN finding_key TEXT")
+    for r in c.execute("SELECT id, process_name, remote_ip, is_simulated FROM threat_findings "
+                       "WHERE finding_key IS NULL").fetchall():
+        c.execute("UPDATE threat_findings SET finding_key = ? WHERE id = ?",
+                  (finding_key(r["process_name"], r["remote_ip"], r["is_simulated"]), r["id"]))
+    # Merge older duplicates into the first row: earliest first_seen, latest last_seen.
+    c.execute("UPDATE threat_findings SET "
+              "first_seen = (SELECT MIN(s.first_seen) FROM threat_findings s WHERE s.finding_key = threat_findings.finding_key), "
+              "last_seen = (SELECT MAX(s.last_seen) FROM threat_findings s WHERE s.finding_key = threat_findings.finding_key) "
+              "WHERE id IN (SELECT MIN(id) FROM threat_findings GROUP BY finding_key HAVING COUNT(*) > 1)")
+    c.execute("DELETE FROM threat_findings WHERE id NOT IN (SELECT MIN(id) FROM threat_findings GROUP BY finding_key)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_threat_findings_key ON threat_findings(finding_key)")
+
     # Step 8B geofence fields. Fixed statements only (no interpolation).
     geo_cols = {r["name"] for r in c.execute("PRAGMA table_info(geofence_log)")}
     for name, stmt in (
@@ -131,6 +147,11 @@ def _migrate(c):
     ):
         if name not in geo_cols:
             c.execute(stmt)
+
+
+def finding_key(process_name, remote_ip, is_simulated):
+    """Dedupe key for threat_findings: same app talking to the same server is one finding."""
+    return f"{str(process_name or '').lower()}|{remote_ip or ''}|{1 if is_simulated else 0}"
 
 
 def _now():
@@ -200,25 +221,29 @@ def row_counts():
 # ---------------------------------------------------------------- findings
 
 def upsert_finding(conn):
-    """Record an unsafe connection. Returns True only on first sight of its conn_id.
+    """Record an unsafe connection. Returns True only on first sight of its app + remote IP.
+    A repeat (same app and server, new connection) updates that row instead of adding another:
+    latest conn_id/pid/port/rules/severity, last_seen = now, first_seen kept.
 
     Reads only redacted fields. raw_exe / exe / cmdline are deliberately never read.
     """
     cid = conn.get("id") or conn.get("conn_id")
     if not cid:
         return False
+    key = finding_key(conn.get("process_name"), conn.get("remote_ip"), conn.get("is_simulated"))
     now_m = time.monotonic()
     with _lock:
-        last = _last_write.get(cid)
+        last = _last_write.get(key)
         if last is not None and now_m - last < FINDING_UPDATE_THROTTLE_SECONDS:
             return False
         c = _db()
         now = _now()
         cur = c.execute(
-            "INSERT OR IGNORE INTO threat_findings (conn_id, pid, process_name, remote_ip, remote_port, "
+            "INSERT OR IGNORE INTO threat_findings (finding_key, conn_id, pid, process_name, remote_ip, remote_port, "
             "country_code, city, asn_org, ancestry_json, rules_json, reasons_json, severity, "
-            "first_seen, last_seen, is_simulated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "first_seen, last_seen, is_simulated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
+                key,
                 cid,
                 conn.get("pid"),
                 conn.get("process_name"),
@@ -238,9 +263,19 @@ def upsert_finding(conn):
         )
         is_new = cur.rowcount == 1
         if not is_new:
-            c.execute("UPDATE threat_findings SET last_seen = ? WHERE conn_id = ?", (now, cid))
+            # conn_id is UNIQUE too: if an older row still holds this conn_id under another key (only
+            # possible after a process rename), the update is skipped rather than failing the request.
+            c.execute(
+                "UPDATE OR IGNORE threat_findings SET conn_id = ?, pid = ?, remote_port = ?, country_code = ?, city = ?, "
+                "asn_org = ?, ancestry_json = ?, rules_json = ?, reasons_json = ?, severity = ?, last_seen = ? "
+                "WHERE finding_key = ?",
+                (cid, conn.get("pid"), conn.get("remote_port"), conn.get("country_code"), conn.get("city"),
+                 conn.get("asn_org"), json.dumps([str(n) for n in (conn.get("ancestry") or [])]),
+                 json.dumps(list(conn.get("rules_fired") or [])), json.dumps(list(conn.get("reasons") or [])),
+                 conn.get("severity"), now, key),
+            )
         c.commit()
-        _last_write[cid] = now_m
+        _last_write[key] = now_m
         return is_new
 
 

@@ -22,6 +22,7 @@ import geo
 import quarantine_guards
 import scenarios
 from threats import classify
+import insights
 
 log = logging.getLogger("geotracker.connections")
 
@@ -375,6 +376,9 @@ def get_snapshot():
     except Exception as e:
         log.warning("Could not queue connections for Databricks export: %s", type(e).__name__)
     anycast.sort(key=lambda c: (c["status"] != "unsafe", c["id"]))
+    everything = connections + anycast
+    for c in everything:
+        c["insights"] = insights.build(c, everything)
 
     unsafe_count = sum(1 for c in connections if c["status"] == "unsafe")
     stats = {
