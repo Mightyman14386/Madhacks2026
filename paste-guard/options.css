@@ -1,0 +1,13 @@
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+body { margin: 0; padding: 32px 20px; }
+main { max-width: 850px; margin: auto; }
+h1 { margin-bottom: 8px; }
+fieldset { border: 1px solid #8887; border-radius: 12px; padding: 20px; }
+.entry { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+label.term { flex: 1; min-width: 160px; }
+label.case { flex-direction: row; align-items: center; padding-bottom: 8px; }
+input[type=text], select, button { font: inherit; padding: 8px 10px; border: 1px solid #8889; border-radius: 6px; }
+button { cursor: pointer; }
+button[type=submit] { background: #17604b; color: white; margin-left: 10px; }
+#status[data-error=true] { color: #cc4545; }

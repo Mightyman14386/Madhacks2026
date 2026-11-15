@@ -9,6 +9,9 @@
 
 const PG_SITES = ["chatgpt.com", "chat.openai.com"];
 
-// CSS selectors for a site's chat input box. We try them in order.
-// "#prompt-textarea" is ChatGPT's input. The other two are generic fallbacks.
-const PG_INPUT_SELECTORS = ["#prompt-textarea", "textarea", "[contenteditable='true']"];
+// Scope fallbacks to the composer so unrelated text fields are unaffected.
+const PG_INPUT_SELECTORS = [
+  "#prompt-textarea",
+  "form[data-type='unified-composer'] textarea",
+  "form[data-type='unified-composer'] [contenteditable='true']",
+];

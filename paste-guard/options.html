@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paste Guard settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <h1>Paste Guard</h1>
+    <p>Names and common sensitive patterns are detected locally. Add terms below for names, organizations, or confidential phrases you want to protect explicitly.</p>
+    <p>Watchlist terms are saved on this device, not synced. Replacement mappings last for this browser session. Automatic English name detection can miss or misidentify names; review the text before sending.</p>
+    <form id="settings">
+      <fieldset id="fields" disabled>
+        <legend>Custom watchlist</legend>
+        <div id="entries"></div>
+        <button id="add" type="button">Add term</button>
+        <button type="submit">Save watchlist</button>
+      </fieldset>
+    </form>
+    <p id="status" role="status" aria-live="polite">Loading settings…</p>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

@@ -1,105 +1,121 @@
-// detector.js
-// Finds sensitive items in text and swaps them for labels like [EMAIL_1].
-// Content scripts can't use import/export, so everything is shared
-// through one global object called PasteGuard.
-
+// Pure local detection. Offsets always refer to the ORIGINAL text; the worker
+// resolves matches and allocates aliases before rendering the result once.
 const PasteGuard = (() => {
-  // ---------- 1. The vault: label <-> real value ----------
-  // Kept in memory and mirrored to chrome.storage.session, which is wiped
-  // when the browser closes. Real values NEVER go to sync or local storage.
-  let vault = { labelToValue: {}, valueToLabel: {}, counters: {} };
-  let watchlist = []; // user's custom words (from chrome.storage.sync)
+  const WATCH_TYPES = new Set(["PERSON", "ORG", "CONFIDENTIAL", "WATCH"]);
+  const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = /[\p{L}\p{N}\p{M}_]/u;
 
-  // Load saved vault + watchlist when the page opens.
-  const ready = Promise.all([
-    chrome.storage.session.get("pgVault").then((r) => { if (r.pgVault) vault = r.pgVault; }),
-    chrome.storage.sync.get({ watchlist: [] }).then((r) => { watchlist = r.watchlist; }),
-  ]).catch((err) => console.warn("[Paste Guard] Could not load storage:", err));
-
-  // Stay in sync if another tab or the popup changes things.
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "session" && changes.pgVault && changes.pgVault.newValue) vault = changes.pgVault.newValue;
-    if (area === "sync" && changes.watchlist) watchlist = changes.watchlist.newValue || [];
-  });
-
-  // Return the label for a value, creating one the first time we see it.
-  // This is what makes the same value always get the same label.
-  function labelFor(type, value) {
-    const key = type + ":" + (type === "WATCH" ? value.toLowerCase() : value);
-    if (vault.valueToLabel[key]) return vault.valueToLabel[key];
-
-    vault.counters[type] = (vault.counters[type] || 0) + 1;
-    const label = `[${type}_${vault.counters[type]}]`;
-    vault.valueToLabel[key] = label;
-    vault.labelToValue[label] = value;
-    return label;
+  function normalizeWatchlist(value, strict = false) {
+    if (!Array.isArray(value)) {
+      if (strict) throw new Error("The watchlist must be a list.");
+      return [];
+    }
+    if (value.length > 500) throw new Error("Use at most 500 watchlist entries.");
+    const result = [], seen = new Set();
+    for (const item of value) {
+      const entry = typeof item === "string" ? { text: item, type: "WATCH" } : item;
+      if (!entry || typeof entry.text !== "string" || !WATCH_TYPES.has(entry.type)
+          || !entry.text.trim() || entry.text.trim().length > 200) {
+        if (strict) throw new Error("Each entry needs a term (1–200 characters) and a valid category.");
+        continue;
+      }
+      const text = entry.text.trim(), caseSensitive = entry.caseSensitive === true;
+      const key = `${caseSensitive}:${caseSensitive ? text : text.toLowerCase()}`;
+      if (seen.has(key)) {
+        if (strict) throw new Error("Remove duplicate watchlist terms.");
+        continue;
+      }
+      seen.add(key);
+      result.push({ text, type: entry.type, caseSensitive });
+    }
+    return result;
   }
 
-  // ---------- 2. Extra checks to avoid false alarms ----------
-  // Luhn check: the checksum every real credit card number passes.
-  function passesLuhn(match) {
-    const digits = match.replace(/\D/g, "");
-    if (digits.length < 13 || digits.length > 19) return false;
+  function passesLuhn(value) {
+    const digits = value.replace(/\D/g, "");
+    if (digits.length < 13 || digits.length > 19 || /^(\d)\1+$/.test(digits)) return false;
     let sum = 0;
     for (let i = 0; i < digits.length; i++) {
-      let d = Number(digits[digits.length - 1 - i]);
-      if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9; }
-      sum += d;
+      let digit = Number(digits[digits.length - 1 - i]);
+      if (i % 2) { digit *= 2; if (digit > 9) digit -= 9; }
+      sum += digit;
     }
     return sum % 10 === 0;
   }
 
-  // A long token "looks random" if it mixes lowercase, uppercase and digits.
-  function looksRandom(match) {
-    return /[a-z]/.test(match) && /[A-Z]/.test(match) && /\d/.test(match);
-  }
-
-  // ---------- 3. The patterns ----------
-  // Order matters: specific patterns run first so a JWT isn't
-  // half-eaten by the IP or phone pattern, and so on.
   const RULES = [
-    { type: "JWT",   re: /\beyJ[\w-]+\.eyJ[\w-]+\.[\w-]+/g },
-    { type: "KEY",   re: /\b(?:sk-[\w-]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})/g },
-    { type: "EMAIL", re: /\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g },
-    { type: "CARD",  re: /\b(?:\d[ -]?){12,18}\d\b/g, check: passesLuhn },
-    { type: "SSN",   re: /\b\d{3}-\d{2}-\d{4}\b/g },
-    { type: "IP",    re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g },
-    { type: "PHONE", re: /(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\b\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/g },
-    { type: "KEY",   re: /\b[\w-]{32,}\b/g, check: looksRandom }, // generic long tokens
+    { type: "JWT", re: /(?<![\w-])eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+(?![\w-])/g },
+    { type: "KEY", re: /(?<![\w-])(?:sk-[\w-]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})(?![\w-])/g },
+    { type: "EMAIL", re: /(?<![\w.%+@-])[\w.%+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}(?![\w@-])/g },
+    // Require common card grouping with a consistent separator. Arbitrary
+    // digit/separator runs can accidentally concatenate two unrelated SSNs.
+    { type: "CARD", re: /(?<![\w-])(?:\d{4}([ -])\d{4}\1\d{4}\1\d{4}(?:\1\d{1,3})?|\d{4}([ -])\d{6}\2\d{4,5}|\d{13,19})(?![\w-])/g, check: passesLuhn },
+    { type: "SSN", re: /(?<!\w)\d{3}-\d{2}-\d{4}(?!\w)/g,
+      check: (s) => !/^(000|666|9\d\d)-/.test(s) && s.slice(4, 6) !== "00" && s.slice(7) !== "0000" },
+    { type: "IP", re: /(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\w.]|\.\d)/g },
+    { type: "PHONE", re: /(?<![\w+])(?:\+\d{1,3}[ .-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[ .-]?[2-9]\d{2}[ .-]?\d{4}(?!\w)/g },
   ];
 
-  // Escape characters like . or ( so a watchlist word is matched literally.
-  const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-  // ---------- 4. The main function ----------
-  // Takes text, returns { sanitized, found: [{ type, label }, ...] }.
-  function detect(text) {
-    const found = [];
-    let out = text;
-
-    // Replace every match of `re` (if it passes `check`) with its label.
-    const swap = (type, re, check) => {
-      out = out.replace(re, (match) => {
-        if (check && !check(match)) return match; // false alarm, keep it
-        const label = labelFor(type, match);
-        found.push({ type, label });
-        return label;
-      });
+  function collect(text, watchlist = []) {
+    if (typeof text !== "string" || text.length > 100000) throw new Error("Paste up to 100,000 characters at a time.");
+    const candidates = [];
+    const add = (start, end, type, source, rank) => {
+      if (start >= 0 && end > start && end <= text.length) candidates.push({ start, end, type, source, rank, value: text.slice(start, end) });
     };
-
-    // Watchlist first: whole word, any letter case.
-    for (const term of watchlist) {
-      if (term.trim()) swap("WATCH", new RegExp(`(?<!\\w)${escapeRegex(term.trim())}(?!\\w)`, "gi"));
+    RULES.forEach((rule, i) => {
+      for (const match of text.matchAll(rule.re)) {
+        if (!rule.check || rule.check(match[0])) add(match.index, match.index + match[0].length, rule.type, "pattern", 400 - i);
+      }
+    });
+    // Mixed case alone is not evidence of a secret. Unprefixed tokens require
+    // explicit context instead of replacing ordinary long identifiers.
+    const contextualKey = /\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{12,})/gi;
+    for (const match of text.matchAll(contextualKey)) {
+      const start = match.index + match[0].lastIndexOf(match[1]);
+      add(start, start + match[1].length, "KEY", "pattern", 390);
     }
-    for (const rule of RULES) swap(rule.type, rule.re, rule.check);
-
-    // Save the vault for this browser session (fire and forget).
-    if (found.length) chrome.storage.session.set({ pgVault: vault }).catch(() => {});
-    return { sanitized: out, found };
+    for (const entry of normalizeWatchlist(watchlist)) {
+      const re = new RegExp(escapeRegex(entry.text), entry.caseSensitive ? "gu" : "giu");
+      for (const match of text.matchAll(re)) {
+        const start = match.index, end = start + match[0].length;
+        const before = Array.from(text.slice(Math.max(0, start - 2), start)).at(-1) || "";
+        const after = Array.from(text.slice(end, end + 2))[0] || "";
+        if ((word.test(Array.from(entry.text)[0]) && word.test(before))
+            || (word.test(Array.from(entry.text).at(-1)) && word.test(after))) continue;
+        add(start, end, entry.type, "watchlist", 200);
+      }
+    }
+    if (typeof nlp !== "function") throw new Error("Local name detection is unavailable. Reload Paste Guard.");
+    // Term offsets preserve surrounding quotes, punctuation and whitespace.
+    for (const person of nlp(text).people().json({ offset: true })) {
+      const first = person.terms[0], last = person.terms.at(-1);
+      if (first?.offset && last?.offset) add(first.offset.start, last.offset.start + last.offset.length, "PERSON", "name", 100);
+    }
+    // Structured secrets beat overlapping words. Otherwise longest wins, then
+    // explicit watchlist classifications beat inferred names for equal spans.
+    candidates.sort((a, b) => {
+      const aStructured = a.rank >= 300, bStructured = b.rank >= 300;
+      if (aStructured !== bStructured) return aStructured ? -1 : 1;
+      if (aStructured) return (b.end - b.start) - (a.end - a.start) || b.rank - a.rank;
+      return (b.end - b.start) - (a.end - a.start) || b.rank - a.rank || a.start - b.start;
+    });
+    const selected = [];
+    for (const match of candidates) {
+      if (!selected.some((other) => match.start < other.end && other.start < match.end)) selected.push(match);
+    }
+    if (selected.length > 2000) throw new Error("Too many sensitive items. Paste a smaller section.");
+    return selected.sort((a, b) => a.start - b.start).map(({ rank, ...match }) => match);
   }
 
-  // Used later (Step 4) to swap labels back to real values on screen.
-  const getLabelMap = () => vault.labelToValue;
-
-  return { ready, detect, getLabelMap };
+  function render(text, matches, replacements) {
+    let cursor = 0;
+    const parts = [];
+    matches.forEach((match, i) => {
+      parts.push(text.slice(cursor, match.start), replacements[i]);
+      cursor = match.end;
+    });
+    parts.push(text.slice(cursor));
+    return parts.join("");
+  }
+  return { collect, render, normalizeWatchlist };
 })();

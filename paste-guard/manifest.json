@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Paste Guard",
-  "version": "0.2.0",
-  "description": "Swaps secrets for fake labels before you paste them into an AI chat. Real values never leave your browser.",
+  "version": "0.3.0",
+  "description": "Locally replaces detected names and sensitive text before pasting into supported AI chats. No API keys required.",
   "permissions": ["storage"],
   "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
   "content_scripts": [
     {
       "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-      "js": ["config.js", "detector.js", "content.js"],
+      "js": ["config.js", "content.js"],
       "run_at": "document_start"
     }
   ]
