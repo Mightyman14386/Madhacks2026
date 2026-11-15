@@ -56,9 +56,10 @@ const PasteGuard = (() => {
     { type: "PHONE", re: /(?<![\w+])(?:\+\d{1,3}[ .-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[ .-]?[2-9]\d{2}[ .-]?\d{4}(?!\w)/g },
   ];
 
-  function collect(text, watchlist = []) {
+  function collect(text, watchlist = [], neverRedact = []) {
     if (typeof text !== "string" || text.length > 100000) throw new Error("Paste up to 100,000 characters at a time.");
     const candidates = [];
+    const exclusions = [];
     const add = (start, end, type, source, rank) => {
       if (start >= 0 && end > start && end <= text.length) candidates.push({ start, end, type, source, rank, value: text.slice(start, end) });
     };
@@ -74,7 +75,7 @@ const PasteGuard = (() => {
       const start = match.index + match[0].lastIndexOf(match[1]);
       add(start, start + match[1].length, "KEY", "pattern", 390);
     }
-    for (const entry of normalizeWatchlist(watchlist)) {
+    for (const entry of [...normalizeWatchlist(watchlist), ...normalizeWatchlist(neverRedact).map(e => ({ ...e, exclude: true }))]) {
       const re = new RegExp(escapeRegex(entry.text), entry.caseSensitive ? "gu" : "giu");
       for (const match of text.matchAll(re)) {
         const start = match.index, end = start + match[0].length;
@@ -82,7 +83,8 @@ const PasteGuard = (() => {
         const after = Array.from(text.slice(end, end + 2))[0] || "";
         if ((word.test(Array.from(entry.text)[0]) && word.test(before))
             || (word.test(Array.from(entry.text).at(-1)) && word.test(after))) continue;
-        add(start, end, entry.type, "watchlist", 200);
+        if (entry.exclude) exclusions.push({ start, end });
+        else add(start, end, entry.type, "watchlist", 200);
       }
     }
     if (typeof nlp !== "function") throw new Error("Local name detection is unavailable. Reload Paste Guard.");
@@ -101,6 +103,7 @@ const PasteGuard = (() => {
     });
     const selected = [];
     for (const match of candidates) {
+      if (exclusions.some(e => match.start < e.end && e.start < match.end)) continue;
       if (!selected.some((other) => match.start < other.end && other.start < match.end)) selected.push(match);
     }
     if (selected.length > 2000) throw new Error("Too many sensitive items. Paste a smaller section.");

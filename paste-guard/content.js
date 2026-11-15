@@ -14,7 +14,8 @@
   let active = true;
   const applyState = (state) => {
     if (typeof state?.enabled !== "boolean" || !Array.isArray(state.sites)) return;
-    active = state.enabled && (builtIn || state.sites.includes(location.hostname));
+    active = state.enabled && !(state.neverSites || []).includes(location.hostname)
+      && (builtIn || state.sites.includes(location.hostname));
     console.info(`[Paste Guard] ${active ? "Active" : "Paused"} on ${location.hostname}`);
   };
   chrome.runtime.sendMessage({ type: "PG_GET_STATE" }).then(applyState, () => {});

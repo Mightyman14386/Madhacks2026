@@ -48,3 +48,23 @@ npm run test:browser
 Unit tests use the actual bundled detector with simulated extension storage to exercise initialization, concurrent requests, worker restarts, overlap resolution, alias collisions, malformed configuration, and persistence failures. Browser tests load the actual unpacked MV3 extension in an isolated Chromium profile, route the supported origin to local fixtures, and exercise trusted clipboard pastes, selection replacement, undo, rich text, cancellation, and the settings page. They do not access a ChatGPT account or send a chat message.
 
 For distribution, include only the manifest, runtime JavaScript, options HTML/CSS, and `vendor/` bundle/license; exclude dependencies, tests, and test browser profiles.
+
+## Website rules and phrase exceptions
+
+The settings page contains Always redact and Never redact lists for websites and phrases. Website changes save immediately. Phrase changes are saved together with Save phrase rules. Existing custom phrases and added websites are retained.
+
+Website rules match exact HTTPS hostnames (www and subdomains are separate). New always-redact sites request Chrome host access. Never-redact sites override built-in and added sites; the global pause switch still disables all redaction. Other sites are unchanged. Removing a never rule on a built-in site restores its default protection; removing one on a custom site leaves it unlisted until added again.
+
+Never-redact phrases use literal, whole-word matching and an optional case-sensitive setting. They override automatic detection and manual redaction rules. Any complete detection that overlaps an exception is preserved, including a full email or full name when only part matches the exception. This avoids rewriting a phrase the user explicitly asked to keep. These exceptions persist locally alongside the watchlist.
+
+## Settings & tools (v0.6)
+
+Open Settings & tools from the toolbar popup or settings navigation. Compare detection before and after your phrase exceptions, optionally simulate a destination's site policy, and inspect each match's source and reason. The lab uses temporary aliases without writing to the session vault. Input/results stay in the page and can be cleared; they are not saved. Changes to input, destination, or rules invalidate the previous preview.
+
+Run synthetic checks to exercise ten bundled examples against the detector without custom rules. This is a diagnostic, not an accuracy benchmark. Export counts only downloads a JSON report with category totals and extension version, excluding originals, aliases, phrases, and destination. Copy this preview is an explicit clipboard action. Website pages cannot call the extension-only lab API.
+
+See COMPARISON.md for the public-source product comparison and rationale.
+
+## Unified settings (v0.6.1)
+
+Open Settings & tools from the popup or gear icon. Website rules, phrase rules, text preview, and synthetic detection checks now share one scrolling page, with sidebar links to each section. Save phrase changes before running a preview. Existing lab.html bookmarks redirect to options.html#preview. Popup cards now have consistent gaps and padding.

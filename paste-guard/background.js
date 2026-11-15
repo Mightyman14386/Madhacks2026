@@ -1,4 +1,4 @@
-importScripts("config.js", "vendor/compromise.js", "detector.js");
+importScripts("config.js", "vendor/compromise.js", "detector.js", "lab.js");
 
 // One worker owns the vault. Queue initialization, allocation and persistence
 // together so concurrent tabs cannot assign the same alias to different values.
@@ -56,7 +56,8 @@ function aliasFor(type, number) {
 
 async function sanitize(text) {
   const { watchlist } = await chrome.storage.local.get("watchlist");
-  const matches = PasteGuard.collect(text, watchlist);
+  const { neverRedact = [] } = await chrome.storage.local.get("neverRedact");
+  const matches = PasteGuard.collect(text, watchlist, neverRedact);
   if (!matches.length) return { sanitized: text, found: [] };
   const stored = await chrome.storage.session.get("pgVaultV2");
   const vault = validateVault(stored.pgVaultV2 === undefined ? emptyVault() : stored.pgVaultV2);
@@ -100,6 +101,7 @@ async function getSettings() {
   return {
     enabled: enabled !== false, // on unless the user turned it off
     sites: Array.isArray(sites) ? sites.filter((s) => typeof s === "string") : [],
+    neverSites: (await chrome.storage.local.get("neverSites")).neverSites || [],
   };
 }
 
@@ -118,10 +120,11 @@ async function settingsView() {
 // Tell every open tab running Paste Guard about the new on/off state, so
 // flipping the switch works instantly without reloading pages.
 async function broadcastState() {
+  if (chrome.runtime.sendMessage) chrome.runtime.sendMessage({type:"PG_RULES_CHANGED"}).catch(() => {});
   if (!chrome.tabs) return;
-  const { enabled, sites } = await getSettings();
+  const { enabled, sites, neverSites } = await getSettings();
   for (const tab of await chrome.tabs.query({})) {
-    chrome.tabs.sendMessage(tab.id, { type: "PG_STATE", enabled, sites }).catch(() => {});
+    chrome.tabs.sendMessage(tab.id, { type: "PG_STATE", enabled, sites, neverSites }).catch(() => {});
   }
 }
 
@@ -159,7 +162,8 @@ async function injectIntoOpenTabs(hosts) {
 
 async function addSite(raw) {
   const host = pgNormalizeSite(raw);
-  if (PG_SITES.includes(host)) throw new Error(`${host} is already built in.`);
+  const current = await getSettings();
+  if (PG_SITES.includes(host)) { await chrome.storage.local.set({ neverSites: current.neverSites.filter(s => s !== host) }); await broadcastState(); return; }
   const { sites } = await getSettings();
   if (!sites.includes(host)) {
     if (sites.length >= MAX_SITES) throw new Error(`You can add up to ${MAX_SITES} sites.`);
@@ -168,6 +172,7 @@ async function addSite(raw) {
     }
     await chrome.storage.local.set({ sites: [...sites, host] });
   }
+  await chrome.storage.local.set({ neverSites: current.neverSites.filter(s => s !== host) });
   await syncSiteScripts();
   await injectIntoOpenTabs([host]);
   await broadcastState();
@@ -184,9 +189,23 @@ async function removeSite(raw, releasePermission = true) {
 }
 
 // ---------- Who may send which message ----------
+async function setSiteRule(raw, rule) {
+  const host = pgNormalizeSite(raw);
+  if (!["always", "never", "default"].includes(rule)) throw new Error("Invalid website rule.");
+  if (rule === "always") { await addSite(host); return settingsView(); }
+  const current = await getSettings();
+  const neverSites = current.neverSites.filter(s => s !== host);
+  if (rule === "never") neverSites.push(host);
+  if (neverSites.length > MAX_SITES) throw new Error("Use at most 50 never-redact websites.");
+  await chrome.storage.local.set({ sites: current.sites.filter(s => s !== host), neverSites });
+  await syncSiteScripts();
+  await broadcastState();
+  return settingsView();
+}
+
 const SITE_MESSAGES = new Set(["PG_SANITIZE", "PG_GET_STATE"]);
-const PAGE_MESSAGES = new Set(["PG_GET_WATCHLIST", "PG_SET_WATCHLIST", "PG_GET_SETTINGS", "PG_SET_ENABLED", "PG_ADD_SITE", "PG_REMOVE_SITE"]);
-const EXTENSION_PAGES = ["options.html", "popup.html"];
+const PAGE_MESSAGES = new Set(["PG_GET_WATCHLIST", "PG_SET_WATCHLIST", "PG_GET_SETTINGS", "PG_SET_ENABLED", "PG_ADD_SITE", "PG_REMOVE_SITE", "PG_SET_SITE_RULE", "PG_ANALYZE", "PG_RUN_CHECKS"]);
+const EXTENSION_PAGES = ["options.html", "popup.html", "lab.html"];
 
 // Settings changes only from our own popup/options pages. Pastes only from
 // supported sites (built-in or added by the user).
@@ -194,18 +213,23 @@ async function allowedSender(sender, type) {
   if (sender.id !== chrome.runtime.id || !sender.url) return false;
   let url;
   try { url = new URL(sender.url); } catch { return false; }
-  if (PAGE_MESSAGES.has(type)) return EXTENSION_PAGES.some((page) => url.href === chrome.runtime.getURL(page));
+  if (PAGE_MESSAGES.has(type)) return EXTENSION_PAGES.some((page) => url.href.split("#")[0] === chrome.runtime.getURL(page));
   if (url.protocol !== "https:") return false;
   if (type === "PG_GET_STATE") return true; // harmless: tells a tab whether to stay active
-  return PG_SITES.includes(url.hostname) || (await getSettings()).sites.includes(url.hostname);
+  const settings = await getSettings();
+  return PG_SITES.includes(url.hostname) || settings.sites.includes(url.hostname) || settings.neverSites.includes(url.hostname);
 }
 
-async function handle(message) {
+async function handle(message, sender) {
   switch (message.type) {
     case "PG_SANITIZE":
       // Switched off: hand the text back untouched.
-      if (!(await getSettings()).enabled && typeof message.text === "string") return { sanitized: message.text, found: [] };
+      if (typeof message.text !== "string") throw new Error("Invalid paste.");
+      const state = await getSettings();
+      if (!state.enabled || state.neverSites.includes(new URL(sender.url).hostname)) return { sanitized: message.text, found: [] };
       return sanitize(message.text);
+    case "PG_ANALYZE": return analyzePolicy(message.text, message.site);
+    case "PG_RUN_CHECKS": return runChallenges();
     case "PG_GET_STATE": return getSettings();
     case "PG_GET_SETTINGS": return settingsView();
     case "PG_SET_ENABLED":
@@ -213,16 +237,20 @@ async function handle(message) {
       await chrome.storage.local.set({ enabled: message.enabled });
       await broadcastState();
       return settingsView();
+    case "PG_SET_SITE_RULE": return setSiteRule(message.site, message.rule);
     case "PG_ADD_SITE": await addSite(message.site); return settingsView();
     case "PG_REMOVE_SITE": await removeSite(message.site); return settingsView();
     case "PG_SET_WATCHLIST": {
       const watchlist = PasteGuard.normalizeWatchlist(message.watchlist, true);
-      await chrome.storage.local.set({ watchlist });
-      return { watchlist };
+      const neverRedact = PasteGuard.normalizeWatchlist(message.neverRedact || [], true);
+      await chrome.storage.local.set({ watchlist, neverRedact });
+      if (chrome.runtime.sendMessage) chrome.runtime.sendMessage({type:"PG_RULES_CHANGED"}).catch(() => {});
+      return { watchlist, neverRedact };
     }
     case "PG_GET_WATCHLIST": {
       const { watchlist } = await chrome.storage.local.get("watchlist");
-      return { watchlist: PasteGuard.normalizeWatchlist(watchlist) };
+      const { neverRedact = [] } = await chrome.storage.local.get("neverRedact");
+      return { watchlist: PasteGuard.normalizeWatchlist(watchlist), neverRedact: PasteGuard.normalizeWatchlist(neverRedact) };
     }
   }
 }
@@ -239,7 +267,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!SITE_MESSAGES.has(type) && !PAGE_MESSAGES.has(type)) return false;
   enqueue(async () => {
     if (!(await allowedSender(sender, type))) throw new Error("Paste Guard cannot handle this request from this page.");
-    return handle(message);
+    return handle(message, sender);
   }).then((result) => sendResponse({ ok: true, ...result }), (error) => {
     sendResponse({ ok: false, error: error instanceof Error ? error.message : "Could not safely process the paste." });
   });

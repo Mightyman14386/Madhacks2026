@@ -71,7 +71,8 @@ function siteRow(host, builtIn) {
 // Draw the whole popup from the latest settings.
 function render(next) {
   settings = next;
-  const total = next.builtIn.length + next.sites.length;
+  const allowed = [...new Set([...next.builtIn, ...next.sites])].filter(h => !(next.neverSites || []).includes(h));
+  const total = allowed.length;
 
   $("enabled").disabled = false;
   $("enabled").checked = next.enabled;
@@ -91,13 +92,12 @@ function render(next) {
   }));
 
   $("sites").replaceChildren(
-    ...next.builtIn.map((host) => siteRow(host, true)),
-    ...next.sites.map((host) => siteRow(host, false)),
+    ...allowed.map((host) => siteRow(host, next.builtIn.includes(host))),
   );
 
   // Offer a one-click "add this site" when the current tab isn't covered yet.
   const host = currentHost();
-  const covered = host && (next.builtIn.includes(host) || next.sites.includes(host));
+  const covered = host && allowed.includes(host);
   $("add-current").hidden = !host || covered;
   if (host && !covered) $("add-current").textContent = `+ Protect ${host}`;
 }
@@ -107,7 +107,7 @@ function render(next) {
 function addSite(raw, isCurrentTab) {
   let host;
   try { host = pgNormalizeSite(raw); } catch (error) { say(error.message, true); return; }
-  if (settings?.builtIn.includes(host)) { say(`${host} is already built in.`); return; }
+  if (settings?.builtIn.includes(host) && !(settings.neverSites || []).includes(host)) { say(`${host} is already built in.`); return; }
   if (settings?.sites.includes(host)) { say(`${host} is already on the list.`); return; }
 
   chrome.permissions.request({ origins: [pgOriginFor(host)] })
