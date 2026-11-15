@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+psutil
+geoip2
+python-dotenv
+pydantic
