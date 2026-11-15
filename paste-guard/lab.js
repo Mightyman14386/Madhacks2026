@@ -2,7 +2,8 @@
 const PG_REASONS = {
   pattern: "Matched a structured pattern and its validation rules.",
   watchlist: "Matched an explicit always-redact phrase.",
-  name: "Compromise identified a likely person name using local language rules."
+  name: "Compromise identified a likely person name using local language rules.",
+  dictionary: "Matched the bundled given-name dataset with name-context checks."
 };
 const PG_CHALLENGES = [
   {name:"Full person name",text:"Alice Smith met Bob Jones.",expected:["PERSON","PERSON"]},
@@ -14,7 +15,8 @@ const PG_CHALLENGES = [
   {name:"Invalid IPv4 chain",text:"999.192.168.1.25",expected:[]},
   {name:"Contextual secret",text:"api_key=abcdef0123456789",expected:["KEY"]},
   {name:"Phone number",text:"+1 (608) 555-1234",expected:["PHONE"]},
-  {name:"Plain prose",text:"Please summarize the meeting notes.",expected:[]}
+  {name:"Plain prose",text:"Please summarize the meeting notes.",expected:[]},
+  {name:"Broader name vocabulary",text:"Raghav met Stavan.",expected:["PERSON","PERSON"]}
 ];
 function previewText(text,matches,aliases=new Map()) {
   const counters={};

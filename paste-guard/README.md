@@ -82,3 +82,15 @@ On ordinary HTTP/HTTPS web pages, Never redact wins, then Always On, then the pr
 Run npm run test:sites to test adding through the real popup and settings page in an isolated Chromium profile using the shipping manifest. The scenarios exercise full-URL normalization, duplicates, invalid input, persistence, moving between override lists, removal/re-addition, preview permission checks, and real clipboard redaction on newly added sites with protection off. No Chrome permission APIs or policy storage are mocked in this suite.
 
 Website rules are local settings, so saving them no longer requests optional host permissions. The manifest already declares HTTP/HTTPS access; Chrome site-access settings still control whether scripts can run. Previews check explicit HTTP and HTTPS permission patterns to match the manifest.
+
+## Expanded offline name vocabulary (v0.7.0)
+
+Paste Guard bundles 150,120 normalized given-name spellings from Solvenium's Wiktionary-derived international lists, SSA national name data, and a documented local addition for Stavan. Raghav is present upstream. All detection stays local and needs no API key. Sources, licenses, pinned revisions, checksums, transformations, and limitations are recorded in vendor/names.NOTICE.md, vendor/names.metadata.json, and scripts/name-sources.json.
+
+The dictionary supplements Compromise rather than replacing its full-name parser. A Set provides token lookup; only relevant non-ambiguous input terms are passed as parser hints. This recognizes standalone Raghav/Stavan and full names such as Raghav Patel / Stavan Shah. The preview explains dictionary-backed matches, and the built-in diagnostic now includes an eleventh vocabulary check.
+
+To limit false positives, dictionary additions generally require capitalization, a standalone name, or an explicit person context such as Name: or My name is. Existing non-name vocabulary entries (such as May, Will, Rose, and Meeting) require explicit name context. Tokens within identifiers and URLs are excluded from dictionary matching. Existing NLP heuristics can still make mistakes; this is not universal name detection. In particular, short names under three characters, names absent from the corpus, lowercase prose without person context, unsupported scripts/segmentation, and ambiguous names may be missed. Phrase overrides remain the most reliable way to enforce a specific spelling.
+
+Rebuild deterministically with npm run vendor:names. The development-only fflate dependency reads the SSA archive. Sources are fetched only during this build when not cached; every file must match the pinned SHA-256 before generation. A changed upstream archive fails the build until its checksum is deliberately reviewed. Checked-in vendor output is enough to load the extension; no dataset download runs in the browser.
+
+Tests cover the reported names, several naming traditions, accented/decomposed Unicode, full-name grouping, punctuation/possessives, common prose, identifiers/URLs, priority rules, and Never redact handling. Shipping-browser tests verify actual clipboard replacements and unchanged ambiguous prose.

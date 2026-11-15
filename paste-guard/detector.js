@@ -88,10 +88,21 @@ const PasteGuard = (() => {
       }
     }
     if (typeof nlp !== "function") throw new Error("Local name detection is unavailable. Reload Paste Guard.");
+    if (typeof PasteGuardNames === "undefined") throw new Error("Local name dictionary is unavailable. Reload Paste Guard.");
+    const dictionary = PasteGuardNames.scan(text);
+    for (const match of dictionary.found) add(match.start, match.end, "PERSON", "dictionary", 110);
+    // Hint only relevant input terms, then let the existing parser join full
+    // names. Do not inject the entire dictionary into the NLP vocabulary.
     // Term offsets preserve surrounding quotes, punctuation and whitespace.
-    for (const person of nlp(text).people().json({ offset: true })) {
+    for (const person of nlp(text, dictionary.hints).people().json({ offset: true })) {
       const first = person.terms[0], last = person.terms.at(-1);
-      if (first?.offset && last?.offset) add(first.offset.start, last.offset.start + last.offset.length, "PERSON", "name", 100);
+      if (first?.offset && last?.offset) {
+        const start = first.offset.start;
+        let end = last.offset.start + last.offset.length;
+        if (/[\u0027\u2019]s$/i.test(text.slice(start,end))) end -= 2;
+        const source = dictionary.found.some(m => m.start < end && start < m.end) ? "dictionary" : "name";
+        add(start, end, "PERSON", source, 100);
+      }
     }
     // Structured secrets beat overlapping words. Otherwise longest wins, then
     // explicit watchlist classifications beat inferred names for equal spans.
@@ -103,11 +114,13 @@ const PasteGuard = (() => {
     });
     const selected = [];
     for (const match of candidates) {
-      if (exclusions.some(e => match.start < e.end && e.start < match.end)) continue;
       if (!selected.some((other) => match.start < other.end && other.start < match.end)) selected.push(match);
     }
     if (selected.length > 2000) throw new Error("Too many sensitive items. Paste a smaller section.");
-    return selected.sort((a, b) => a.start - b.start).map(({ rank, ...match }) => match);
+    // Resolve whole names before applying exceptions, so an excluded full
+    // match cannot leave a smaller nested match (e.g. a surname) behind.
+    return selected.filter(match => !exclusions.some(e => match.start < e.end && e.start < match.end))
+      .sort((a, b) => a.start - b.start).map(({ rank, ...match }) => match);
   }
 
   function render(text, matches, replacements) {
