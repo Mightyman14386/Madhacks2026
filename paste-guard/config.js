@@ -1,14 +1,7 @@
 // config.js
-// The one place that lists which AI chat sites Paste Guard protects.
+// Sites are added by the user from Settings & tools.
 // (Uses "var" so this file can safely run twice in the same tab.)
-//
-// To add a site (for example claude.ai):
-//   1. Add "claude.ai" to PG_SITES below.
-//   2. Add "https://claude.ai/*" to "matches" in manifest.json.
-//      (Chrome reads manifest.json before any of our code runs, so the
-//       manifest needs its own copy of the list.)
-
-var PG_SITES = ["chatgpt.com", "chat.openai.com"];
+var PG_SITES = [];
 
 // Scope fallbacks to the composer so unrelated text fields are unaffected.
 // ChatGPT changes its markup often, so we list the current composer form
@@ -33,11 +26,21 @@ function pgNormalizeSite(input) {
   if (!/^[a-z][a-z0-9+.-]*:\/\//.test(text)) text = "https://" + text;
   let url;
   try { url = new URL(text); } catch { throw new Error("That doesn't look like a website address."); }
-  if (url.protocol !== "https:") throw new Error("Only https:// websites are supported.");
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only HTTP and HTTPS websites are supported.");
   const host = url.hostname;
   if (!/^[a-z0-9.-]+$/.test(host) || !host.includes(".")) throw new Error("That doesn't look like a website address.");
   return host;
 }
 
-// The Chrome permission pattern for one site, e.g. "https://example.com/*".
-var pgOriginFor = (host) => `https://${host}/*`;
+// Match both HTTP and HTTPS for a hostname.
+var pgOriginFor = (host) => "*://" + host + "/*";
+
+// Explicit site rules override the default protection switch. Never wins.
+function pgShouldRedact(host, state) {
+  if ((state.neverSites || []).includes(host)) return false;
+  if ((state.sites || []).includes(host)) return true;
+  return state.enabled === true;
+}
+
+// Chrome permission checks require the explicit patterns declared in manifest.
+var pgOriginsFor = (host) => ["http://" + host + "/*", "https://" + host + "/*"];

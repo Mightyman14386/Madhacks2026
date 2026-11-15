@@ -5,7 +5,8 @@ const root = path.resolve(__dirname, '..');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function boot(options = {}) {
-  const state = options.state || { session: {}, local: {}, sync: {} };
+  const state = options.state || { session: {}, local: { sites: ['chatgpt.com'] }, sync: {} };
+  if (state.local.sites === undefined) state.local.sites = ['chatgpt.com'];
   const controls = { failWrite: false, failRead: false, delay: 0, ...options.controls };
   const writes = [], access = [];
   let listener;

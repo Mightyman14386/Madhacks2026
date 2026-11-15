@@ -23,14 +23,14 @@
     </button>
   </header>
 
-  <!-- Master switch: turns protection on/off on every site at once. -->
+  <!-- Default protection switch. Explicit Always On sites remain protected. -->
   <section id="power" class="power" data-on="true">
     <div class="power-text">
       <strong id="status-title">Protection on</strong>
       <span id="status-sub">Loading…</span>
     </div>
     <label class="switch">
-      <input id="enabled" type="checkbox" role="switch" aria-label="Turn Paste Guard on or off everywhere" disabled>
+      <input id="enabled" type="checkbox" role="switch" aria-label="Toggle default protection; Always On sites stay protected" disabled>
       <span class="track"><span class="thumb"></span></span>
     </label>
   </section>
@@ -44,8 +44,8 @@
   <!-- Sites where Paste Guard switches on automatically. -->
   <section class="card">
     <div class="card-head">
-      <h2>Active sites</h2>
-      <span class="hint">Runs automatically</span>
+      <h2>Always On</h2>
+      <span class="hint">Overrides the switch</span>
     </div>
     <ul id="sites" class="sites"></ul>
     <button id="add-current" class="add-current" type="button" hidden></button>

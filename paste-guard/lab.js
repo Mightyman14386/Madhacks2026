@@ -41,10 +41,9 @@ async function analyzePolicy(text,site) {
   // Without a destination, evaluate phrase rules even while the global switch is off.
   if(site) {
     const host=pgNormalizeSite(site);
-    if(!settings.enabled) siteReason="The master protection switch is paused.";
-    else if(settings.neverSites.includes(host)) siteReason="This website is on your Never redact list.";
-    else if(!PG_SITES.includes(host) && !settings.sites.includes(host)) siteReason="This website is not enabled for Paste Guard.";
-    else if(!PG_SITES.includes(host) && chrome.permissions && !(await chrome.permissions.contains({origins:[pgOriginFor(host)]}))) siteReason="Chrome access to this website has not been granted.";
+    if(settings.neverSites.includes(host)) siteReason="This website is on your Never redact list.";
+    else if(!pgShouldRedact(host,settings)) siteReason=settings.enabled ? "This website is not enabled for Paste Guard." : "Protection is off and this website is not on the Always On list.";
+    else if(!PG_SITES.includes(host) && chrome.permissions && !(await chrome.permissions.contains({origins:pgOriginsFor(host)}))) siteReason="Chrome access to this website has not been granted.";
     if(siteReason) selected=[];
   }
   const selectedKeys=new Set(selected.map(m=>m.start+":"+m.end+":"+m.type));

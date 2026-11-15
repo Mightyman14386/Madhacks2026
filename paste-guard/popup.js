@@ -28,11 +28,11 @@ function say(text, error = false) {
 function currentHost() {
   try {
     const url = new URL(currentTab?.url || "");
-    return url.protocol === "https:" ? url.hostname : null;
+    return ["http:", "https:"].includes(url.protocol) ? url.hostname : null;
   } catch { return null; }
 }
 
-// One row in the "Active sites" list.
+// One row in the Always On site list.
 function siteRow(host, builtIn) {
   const li = document.createElement("li");
   li.className = "site";
@@ -77,10 +77,10 @@ function render(next) {
   $("enabled").disabled = false;
   $("enabled").checked = next.enabled;
   $("power").dataset.on = String(next.enabled);
-  $("status-title").textContent = next.enabled ? "Protection on" : "Protection paused";
+  $("status-title").textContent = next.enabled ? "Protection on" : "Protection off";
   $("status-sub").textContent = next.enabled
-    ? `Guarding pastes on ${total} site${total === 1 ? "" : "s"}`
-    : "Pastes pass through unchanged";
+    ? "Protecting websites by default"
+    : total ? "Always On still protects " + total + " site" + (total === 1 ? "" : "s") : "No Always On sites configured";
 
   $("count").textContent = next.protectedCount;
   $("types").replaceChildren(...Object.entries(next.byType).map(([type, n]) => {
@@ -102,27 +102,19 @@ function render(next) {
   if (host && !covered) $("add-current").textContent = `+ Protect ${host}`;
 }
 
-// Add a site. Chrome only shows its permission prompt if we ask right away
-// inside the click, so there is no "await" before permissions.request.
-function addSite(raw, isCurrentTab) {
+// Website access is declared in the manifest; saving a policy needs no prompt.
+async function addSite(raw) {
   let host;
   try { host = pgNormalizeSite(raw); } catch (error) { say(error.message, true); return; }
-  if (settings?.builtIn.includes(host) && !(settings.neverSites || []).includes(host)) { say(`${host} is already built in.`); return; }
-  if (settings?.sites.includes(host)) { say(`${host} is already on the list.`); return; }
-
-  chrome.permissions.request({ origins: [pgOriginFor(host)] })
-    .then(async (granted) => {
-      if (!granted) { say(`Permission declined, so ${host} wasn't added.`, true); return; }
-      render(await send({ type: "PG_ADD_SITE", site: host }));
-      $("site-input").value = "";
-      if (isCurrentTab && currentTab) {
-        chrome.tabs.reload(currentTab.id); // load Paste Guard into this tab now
-        say(`Added ${host} and reloaded the tab.`);
-      } else {
-        say(`Added ${host}. Reload any open ${host} tabs to start.`);
-      }
-    })
-    .catch((error) => say(error.message, true));
+  if (settings?.sites.includes(host) && !(settings.neverSites || []).includes(host)) { say(host + " is already on the list."); return; }
+  const button = $("add-form").querySelector("button");
+  button.disabled = true; $("add-current").disabled = true;
+  try {
+    render(await send({ type: "PG_ADD_SITE", site: host }));
+    $("site-input").value = "";
+    say("Added " + host + " to Always On. The rule applies immediately.");
+  } catch (error) { say(error.message, true); }
+  finally { button.disabled = false; $("add-current").disabled = false; }
 }
 
 // ---------- Wire up the controls ----------
@@ -140,9 +132,9 @@ $("enabled").addEventListener("change", async (event) => {
 $("add-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const raw = $("site-input").value;
-  addSite(raw, (() => { try { return pgNormalizeSite(raw) === currentHost(); } catch { return false; } })());
+  addSite(raw);
 });
-$("add-current").addEventListener("click", () => addSite(currentHost(), true));
+$("add-current").addEventListener("click", () => addSite(currentHost()));
 
 const openSettings = () => chrome.runtime.openOptionsPage();
 $("open-settings").addEventListener("click", openSettings);

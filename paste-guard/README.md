@@ -8,7 +8,7 @@ A Manifest V3 Chrome extension that replaces detected sensitive text when pastin
 2. Select this `paste-guard` directory. For an existing installation, click **Reload**.
 3. Reload existing ChatGPT tabs so they receive the new paste handler.
 4. Paste into the chat composer. For example, `Alice Smith: alice@example.com` becomes `Alex Morgan: [EMAIL_1]` in a fresh session.
-5. Click the toolbar icon to open the popup: a master on/off switch (applies instantly to every open tab), a session counter, and **Active sites**. ChatGPT is built in; add any other `https://` site and Chrome asks once for permission, after which Paste Guard auto-activates there (guarding any textarea/rich editor on that site). Removing a site releases the permission.
+5. Click the toolbar icon to open the popup: a default protection switch (Always On sites remain protected), a session counter, and **Always On**. HTTP/HTTPS sites follow the switch by default; add a hostname to Always On to keep protection enabled there even when the switch is off. Removing a site restores the default switch behavior.
 6. Open the extension's **Details → Extension options** (or **Watchlist & settings** in the popup) to add custom terms with categories: Person, Organization, Confidential phrase, or Generic term.
 
 The bundled `vendor/compromise.js` is included, so loading the extension does not require npm. Aliases depend on prior detections and are reused for the same value during the session. People receive readable names, organizations receive `Example Company N`, and structured secrets receive category labels. If an existing alias also appears literally in a paste that needs that alias, the paste is blocked with an explanation rather than introducing an ambiguous mapping.
@@ -53,7 +53,7 @@ For distribution, include only the manifest, runtime JavaScript, options HTML/CS
 
 The settings page contains Always redact and Never redact lists for websites and phrases. Website changes save immediately. Phrase changes are saved together with Save phrase rules. Existing custom phrases and added websites are retained.
 
-Website rules match exact HTTPS hostnames (www and subdomains are separate). New always-redact sites request Chrome host access. Never-redact sites override built-in and added sites; the global pause switch still disables all redaction. Other sites are unchanged. Removing a never rule on a built-in site restores its default protection; removing one on a custom site leaves it unlisted until added again.
+Website rules match exact HTTP/HTTPS hostnames (www and subdomains are separate). Ordinary HTTP and HTTPS websites are protected by default when the switch is on. Never-redact sites override added sites; Always On sites remain protected even when the default protection switch is off. Removing a site override restores the default switch behavior.
 
 Never-redact phrases use literal, whole-word matching and an optional case-sensitive setting. They override automatic detection and manual redaction rules. Any complete detection that overlaps an exception is preserved, including a full email or full name when only part matches the exception. This avoids rewriting a phrase the user explicitly asked to keep. These exceptions persist locally alongside the watchlist.
 
@@ -65,6 +65,20 @@ Run synthetic checks to exercise ten bundled examples against the detector witho
 
 See COMPARISON.md for the public-source product comparison and rationale.
 
-## Unified settings (v0.6.2)
+## Unified settings (v0.6.3)
 
 Open Settings & tools from the popup or gear icon. Website rules, phrase rules, text preview, and synthetic detection checks now share one scrolling page, with sidebar links to each section. Save phrase changes before running a preview. Existing lab.html bookmarks redirect to options.html#preview. Popup cards now have consistent gaps and padding.
+
+## Always On precedence
+
+Never-redact websites override all other website rules. Explicit Always On sites (the stored sites list) override the default protection switch, so switching protection off does not pause these sites. Unlisted websites follow the default protection switch. The content script, background worker, and text preview use the same policy helper. Phrase exceptions continue to apply on Always On sites.
+
+## Default website protection (v0.6.5)
+
+On ordinary HTTP/HTTPS web pages, Never redact wins, then Always On, then the protection switch. The manifest requests access to HTTP/HTTPS pages and injects the handler at document start, including pages on neither list. Restricted browser pages, extension pages, unsupported editor implementations, and sites where Chrome withholds access are outside this coverage. Existing tabs should be refreshed after updating. Textareas and contenteditable editors are supported; single-line fields, typing, and uploads are unchanged.
+
+## Website-list regression checks (v0.6.6)
+
+Run npm run test:sites to test adding through the real popup and settings page in an isolated Chromium profile using the shipping manifest. The scenarios exercise full-URL normalization, duplicates, invalid input, persistence, moving between override lists, removal/re-addition, preview permission checks, and real clipboard redaction on newly added sites with protection off. No Chrome permission APIs or policy storage are mocked in this suite.
+
+Website rules are local settings, so saving them no longer requests optional host permissions. The manifest already declares HTTP/HTTPS access; Chrome site-access settings still control whether scripts can run. Previews check explicit HTTP and HTTPS permission patterns to match the manifest.

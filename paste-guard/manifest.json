@@ -1,15 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Paste Guard",
-  "version": "0.6.2",
+  "version": "0.6.6",
   "description": "Locally replaces detected names and sensitive text before pasting into supported AI chats. No API keys required.",
   "permissions": [
     "storage",
     "scripting",
     "activeTab"
-  ],
-  "optional_host_permissions": [
-    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -34,8 +31,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
+        "http://*/*",
+        "https://*/*"
       ],
       "js": [
         "config.js",
@@ -43,5 +40,9 @@
       ],
       "run_at": "document_start"
     }
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ]
 }

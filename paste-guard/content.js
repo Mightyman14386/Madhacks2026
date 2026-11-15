@@ -9,13 +9,12 @@
   const builtIn = PG_SITES.includes(location.hostname);
   const selectors = builtIn ? PG_INPUT_SELECTORS : PG_GENERIC_SELECTORS;
 
-  // Master on/off switch from the popup. Starts "on" so nothing slips through
-  // while the real setting loads, then updates live when the switch is flipped.
+  // Apply the default switch and explicit Always On / Never redact rules.
+  // Intercept until initialization finishes, then update live with site policy.
   let active = true;
   const applyState = (state) => {
     if (typeof state?.enabled !== "boolean" || !Array.isArray(state.sites)) return;
-    active = state.enabled && !(state.neverSites || []).includes(location.hostname)
-      && (builtIn || state.sites.includes(location.hostname));
+    active = pgShouldRedact(location.hostname, state);
     console.info(`[Paste Guard] ${active ? "Active" : "Paused"} on ${location.hostname}`);
   };
   chrome.runtime.sendMessage({ type: "PG_GET_STATE" }).then(applyState, () => {});
@@ -121,7 +120,7 @@
   }, true);
 
   window.addEventListener("paste", (event) => {
-    if (!active) return; // switched off: let the site handle the paste normally
+    if (!active) return; // current site policy allows the native paste
     // The extension was reloaded and this copy is stale. Step aside so the
     // freshly injected copy handles the paste instead of showing an error.
     if (!chrome.runtime?.id) return;

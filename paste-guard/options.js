@@ -46,18 +46,18 @@ function renderSites(next) {
     if (!hosts.length) { const empty = document.createElement("div"); empty.className="empty"; empty.textContent="No websites in this list."; container.append(empty); }
   }
 }
-function addSite(rule) {
+async function addSite(rule) {
   let host;
   try { host = pgNormalizeSite($(rule+"-input").value); } catch(e) { report(e.message,true); return; }
-  const button=$(rule+"-add"); button.disabled=true;
-  // Permission request must be initiated directly from the user's click.
-  const permission = rule === "always" && !settings.builtIn.includes(host) ? chrome.permissions.request({origins:[pgOriginFor(host)]}) : Promise.resolve(true);
-  permission.then(async granted => {
-    if (!granted) throw new Error("Website access was declined. The rule was not added.");
+  const button=$(rule+"-add");
+  if (button.disabled) return;
+  button.disabled=true;
+  try {
     renderSites(await send({type:"PG_SET_SITE_RULE",site:host,rule}));
     $(rule+"-input").value="";
     report("Website rule saved." + (dirty ? " Phrase changes are still unsaved." : ""));
-  }).catch(e=>report(e.message,true)).finally(()=>button.disabled=false);
+  } catch(e) { report(e.message,true); }
+  finally { button.disabled=false; }
 }
 for(const rule of ["always","never"]) {
   $(rule+"-add").addEventListener("click",()=>addSite(rule));

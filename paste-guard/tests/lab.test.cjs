@@ -17,8 +17,8 @@ test('analysis follows selected destination and global pause',async()=>{
  const r=await b.send({type:'PG_ANALYZE',text:'Alice Smith',site:'chatgpt.com'},true);
  assert.equal(r.sanitized,'Alice Smith');assert.match(r.siteReason,/Never redact/);
  const unknown=await b.send({type:'PG_ANALYZE',text:'Alice Smith',site:'unknown.example'},true);
- assert.equal(unknown.report.redacted,0);
- const invalid=await b.send({type:'PG_ANALYZE',text:'Alice Smith',site:'http://example.com'},true);
+ assert.equal(unknown.report.redacted,1);
+ const invalid=await b.send({type:'PG_ANALYZE',text:'Alice Smith',site:'ftp://example.com'},true);
  assert.equal(invalid.ok,false);
 });
 test('web pages cannot call the lab or obtain original findings',async()=>{

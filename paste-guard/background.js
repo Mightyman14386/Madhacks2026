@@ -128,28 +128,16 @@ async function broadcastState() {
   }
 }
 
-// Ask Chrome to auto-inject our content script on every user-added site we
-// still have permission for. Chrome remembers this across restarts.
+// Clear registrations left over from the former per-site injection model.
 async function syncSiteScripts() {
-  if (!chrome.scripting || !chrome.permissions) return;
-  const { sites } = await getSettings();
-  const granted = [];
-  for (const host of sites) {
-    if (await chrome.permissions.contains({ origins: [pgOriginFor(host)] })) granted.push(host);
-  }
+  // The manifest now covers ordinary web pages. Remove legacy registrations
+  // so older per-site scripts cannot cause duplicate injection.
+  if (!chrome.scripting) return;
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [SITE_SCRIPT_ID] });
   if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [SITE_SCRIPT_ID] });
-  if (!granted.length) return;
-  await chrome.scripting.registerContentScripts([{
-    id: SITE_SCRIPT_ID,
-    matches: granted.map(pgOriginFor),
-    js: ["config.js", "content.js"],
-    runAt: "document_start",
-  }]);
 }
 
-// Chrome only auto-injects into pages loaded AFTER registration. Inject into
-// tabs that are already open on these sites so protection starts right away.
+// The manifest handles new pages. Inject into open tabs after an update.
 async function injectIntoOpenTabs(hosts) {
   if (!chrome.scripting || !chrome.tabs) return;
   for (const host of hosts) {
@@ -167,9 +155,6 @@ async function addSite(raw) {
   const { sites } = await getSettings();
   if (!sites.includes(host)) {
     if (sites.length >= MAX_SITES) throw new Error(`You can add up to ${MAX_SITES} sites.`);
-    if (chrome.permissions && !(await chrome.permissions.contains({ origins: [pgOriginFor(host)] }))) {
-      throw new Error(`Chrome permission for ${host} was not granted.`);
-    }
     await chrome.storage.local.set({ sites: [...sites, host] });
   }
   await chrome.storage.local.set({ neverSites: current.neverSites.filter(s => s !== host) });
@@ -184,8 +169,8 @@ async function removeSite(raw, releasePermission = true) {
   await chrome.storage.local.set({ sites: sites.filter((s) => s !== host) });
   await syncSiteScripts();
   await broadcastState();
-  // Give back the site permission we asked for when it was added.
-  if (releasePermission && chrome.permissions) await chrome.permissions.remove({ origins: [pgOriginFor(host)] }).catch(() => {});
+  // Keep shared web access: removing an override restores the default policy.
+  // Removing an override restores the default policy; shared web access remains.
 }
 
 // ---------- Who may send which message ----------
@@ -208,25 +193,25 @@ const PAGE_MESSAGES = new Set(["PG_GET_WATCHLIST", "PG_SET_WATCHLIST", "PG_GET_S
 const EXTENSION_PAGES = ["options.html", "popup.html", "lab.html"];
 
 // Settings changes only from our own popup/options pages. Pastes only from
-// supported sites (built-in or added by the user).
+// ordinary HTTP/HTTPS pages running our content script.
 async function allowedSender(sender, type) {
   if (sender.id !== chrome.runtime.id || !sender.url) return false;
   let url;
   try { url = new URL(sender.url); } catch { return false; }
   if (PAGE_MESSAGES.has(type)) return EXTENSION_PAGES.some((page) => url.href.split("#")[0] === chrome.runtime.getURL(page));
-  if (url.protocol !== "https:") return false;
+  if (!["http:", "https:"].includes(url.protocol)) return false;
   if (type === "PG_GET_STATE") return true; // harmless: tells a tab whether to stay active
-  const settings = await getSettings();
-  return PG_SITES.includes(url.hostname) || settings.sites.includes(url.hostname) || settings.neverSites.includes(url.hostname);
+  // Chrome supplies this sender for our content script. Policy is checked in handle().
+  return true;
 }
 
 async function handle(message, sender) {
   switch (message.type) {
     case "PG_SANITIZE":
-      // Switched off: hand the text back untouched.
+      // Always On sites remain protected when the default switch is off.
       if (typeof message.text !== "string") throw new Error("Invalid paste.");
       const state = await getSettings();
-      if (!state.enabled || state.neverSites.includes(new URL(sender.url).hostname)) return { sanitized: message.text, found: [] };
+      if (!pgShouldRedact(new URL(sender.url).hostname, state)) return { sanitized: message.text, found: [] };
       return sanitize(message.text);
     case "PG_ANALYZE": return analyzePolicy(message.text, message.site);
     case "PG_RUN_CHECKS": return runChallenges();
@@ -274,24 +259,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-// Re-register user sites whenever the extension starts or is reloaded. After a
-// reload, also re-inject into open tabs (built-in and added sites) so they
-// keep working without a manual refresh.
+// Apply updates immediately to already-open ordinary web tabs. The manifest
+// handles subsequent navigations. Never-redact and paused pages stand aside.
 chrome.runtime.onInstalled?.addListener(() => {
-  enqueue(async () => {
-    await syncSiteScripts();
-    await injectIntoOpenTabs([...PG_SITES, ...(await getSettings()).sites]);
-  }).catch(() => {});
+  enqueue(async () => { await syncSiteScripts(); await injectIntoOpenTabs(["*"]); }).catch(() => {});
 });
 chrome.runtime.onStartup?.addListener(() => { enqueue(syncSiteScripts).catch(() => {}); });
-
-// Chrome may close the popup while its permission prompt is open, so the
-// worker also adds the site itself once permission is granted. If the user
-// revokes a site in Chrome's settings, drop it from the list too.
-const hostsFrom = (origins = []) => origins.map((o) => /^https:\/\/([^/*]+)\/\*$/.exec(o)?.[1]).filter(Boolean);
-chrome.permissions?.onAdded?.addListener(({ origins }) => {
-  for (const host of hostsFrom(origins)) enqueue(() => addSite(host)).catch(() => {});
-});
-chrome.permissions?.onRemoved?.addListener(({ origins }) => {
-  for (const host of hostsFrom(origins)) enqueue(() => removeSite(host, false)).catch(() => {});
-});

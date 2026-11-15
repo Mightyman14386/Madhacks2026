@@ -91,7 +91,7 @@ test('corrupt vault fails closed instead of remapping existing aliases', async (
 
 test('unsupported senders and settings writes from chat tabs are denied', async () => {
   const b = boot();
-  assert.equal((await b.send({ type: 'PG_SANITIZE', text: 'secret' }, { id: 'test-extension', url: 'https://evil.test' })).ok, false);
+  assert.equal((await b.send({ type: 'PG_SANITIZE', text: 'secret' }, { id: 'test-extension', url: 'chrome://settings' })).ok, false);
   assert.equal((await b.send({ type: 'PG_SET_WATCHLIST', watchlist: [] })).ok, false);
   assert.equal((await b.send({ type: 'PG_GET_WATCHLIST' }, true)).ok, true);
 });

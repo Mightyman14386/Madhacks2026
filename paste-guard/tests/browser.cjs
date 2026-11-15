@@ -9,7 +9,7 @@ if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(bundledBrowser)) proc
 const { chromium } = require('playwright');
 const fixture = rich => `<!doctype html><html><head><style>[contenteditable] { white-space: pre-wrap; }</style></head><body>
 ${rich ? '<div id="prompt-textarea" contenteditable="true"><p>before selected after</p></div>' : '<textarea id="prompt-textarea">before selected after</textarea>'}
-<textarea id="unrelated"></textarea><button id="send">Send</button>
+<input id="unrelated" type="text"><button id="send">Send</button>
 <script>
 window.sitePastes = 0; window.inputEvents = [];
 window.addEventListener('paste', () => window.sitePastes++, true);
@@ -28,17 +28,21 @@ async function run() {
       channel: 'chromium', headless: true,
       args: [`--disable-extensions-except=${root}`, `--load-extension=${root}`],
     });
-    await context.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: fixture(route.request().url().includes('/rich')) }));
-    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://chatgpt.com' });
+    await context.route(/https?:\/\/(chatgpt\.com|unlisted\.example)\//, route => route.fulfill({ contentType: 'text/html', body: fixture(route.request().url().includes('/rich')) }));
+    for(const origin of ['https://chatgpt.com','https://unlisted.example']) await context.grantPermissions(['clipboard-read','clipboard-write'],{origin});
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
+    await worker.evaluate(()=>chrome.storage.local.set({sites:['chatgpt.com'],enabled:true}));
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.goto('https://chatgpt.com/text');
 
     async function paste(targetPage, text) {
-      await targetPage.evaluate(value => navigator.clipboard.writeText(value), text);
+      const clipboardPage=targetPage.url().startsWith('http:')?page:targetPage;
+      await clipboardPage.bringToFront();
+      await clipboardPage.evaluate(value => navigator.clipboard.writeText(value), text);
+      await targetPage.bringToFront();
       await targetPage.keyboard.press('Control+V');
     }
     async function selectText(targetPage, start, end) {
@@ -46,6 +50,60 @@ async function run() {
         input.focus(); input.setSelectionRange(start, end);
       }, [start, end]);
     }
+
+
+    // Exercise the real popup toggle and the already-injected content script.
+    const controls=await context.newPage();
+    await controls.goto('chrome-extension://'+extensionId+'/popup.html');
+    await controls.waitForFunction(()=>!document.querySelector('#enabled').disabled);
+    assert.equal(await controls.getByRole('heading',{name:'Always On',exact:true}).count(),1);
+    await controls.locator('#enabled').uncheck();
+    await controls.waitForFunction(()=>document.querySelector('#status-sub').textContent.includes('Always On still protects'));
+    await selectText(page,0,21);
+    await paste(page,'alice@example.com');
+    await page.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='[EMAIL_1]');
+    passed('popup off toggle preserves real paste redaction on Always On site');
+    await page.reload();
+    await selectText(page,0,21);
+    await paste(page,'alice@example.com');
+    await page.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='[EMAIL_1]');
+    passed('Always On works on newly loaded pages with protection off');
+
+    const unlisted=await context.newPage();
+    await unlisted.goto('https://unlisted.example/text');
+    await selectText(unlisted,0,21);
+    await paste(unlisted,'alice@example.com');
+    await unlisted.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='alice@example.com');
+    passed('unlisted HTTPS site follows off switch');
+    await controls.locator('#enabled').check();
+    await controls.waitForFunction(()=>document.querySelector('#status-title').textContent==='Protection on');
+    await unlisted.reload();
+    await selectText(unlisted,0,21);
+    await paste(unlisted,'alice@example.com');
+    await unlisted.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='[EMAIL_1]');
+    passed('unlisted HTTPS site redacts with protection on');
+    await unlisted.goto('http://unlisted.example/text');
+    await selectText(unlisted,0,21);
+    await paste(unlisted,'alice@example.com');
+    await unlisted.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='[EMAIL_1]');
+    passed('unlisted HTTP site receives the shipping content script');
+    const policyPage=await context.newPage();
+    await policyPage.goto('chrome-extension://'+extensionId+'/options.html');
+    await policyPage.waitForFunction(()=>!document.querySelector('#fields').disabled);
+    await policyPage.locator('#never-input').fill('unlisted.example');
+    await policyPage.locator('#never-add').click();
+    await policyPage.waitForFunction(()=>document.querySelector('#never-sites').textContent.includes('unlisted.example'));
+    await selectText(unlisted,0,9);
+    await paste(unlisted,'alice@example.com');
+    await unlisted.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='alice@example.com');
+    passed('Never redact overrides global protection on an unlisted site');
+    await policyPage.close();
+    await unlisted.close();
+
+    await controls.locator('#enabled').check();
+    await controls.waitForFunction(()=>document.querySelector('#status-title').textContent==='Protection on');
+    await controls.close();
+    await page.reload();
 
     await selectText(page, 7, 15);
     await paste(page, 'Alice Smith: alice@example.com');
@@ -95,7 +153,7 @@ async function run() {
     await paste(page, 'alice@example.com');
     await page.waitForFunction(() => document.querySelector('#unrelated').value === 'alice@example.com');
     assert.equal(await page.evaluate(() => window.sitePastes), 1);
-    passed('unrelated textareas keep native paste behavior');
+    passed('unrelated single-line inputs keep native paste behavior');
 
     // Delay real worker reads, then edit before the response returns.
     await worker.evaluate(() => {
