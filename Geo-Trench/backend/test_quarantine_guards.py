@@ -268,7 +268,7 @@ try:
           RESTORE_ROOT.casefold() in json.dumps(body).casefold() or "quarantine_path" in body
           or "original_path_private" in body, False)
     check("restore: response fields", sorted(body), sorted(
-        ["ok", "message", "manifest_id", "file_name", "restored_to", "sha256_short"]))
+        ["ok", "message", "manifest_id", "file_name", "restored_to", "sha256_short", "op_id"]))
     rec = db.get_quarantine_record(mid)
     check("restore: manifest marked restored with restored_at", (rec["status"], bool(rec["restored_at"])),
           ("restored", True))
@@ -284,6 +284,47 @@ try:
     check("restore: audit messages contain no paths",
           RESTORE_ROOT.casefold() in json.dumps(events).casefold(), False)
     check_restore("restore: double restore refused", mid, 409, "Not in quarantine (status: restored).")
+
+    # ------------------------------------------------------------ permanent delete from quarantine
+    def delete(mid):
+        with mock.patch.object(g, "QUARANTINE_DIR", TQ):
+            return quarantine.delete_quarantined(mid)
+
+    mid, qp, orig = fake_record()
+    name = os.path.basename(orig)
+    for i, simulated in ((1, False), (2, False), (3, True)):
+        db.upsert_finding({"id": f"dd{i:010d}", "pid": 4242, "process_name": name, "remote_ip": f"1.2.3.{i}",
+                           "remote_port": 443, "severity": "medium", "rules_fired": [], "reasons": [],
+                           "ancestry": [], "is_simulated": simulated})
+    db.upsert_finding({"id": "dd0000000009", "pid": 7, "process_name": "other.exe", "remote_ip": "1.2.3.9",
+                       "remote_port": 443, "severity": "low", "rules_fired": [], "reasons": [],
+                       "ancestry": [], "is_simulated": False})
+    def findings_for(n):
+        return db._db().execute("SELECT is_simulated FROM threat_findings WHERE process_name = ?", (n,)).fetchall()
+    code, body = delete(mid)
+    check("delete: success", (code, body["ok"], body["message"], body["file_name"]),
+          (200, True, "Permanently deleted from quarantine.", os.path.basename(orig)))
+    check("delete: .quar file removed, original not recreated", (os.path.exists(qp), os.path.exists(orig)), (False, False))
+    check("delete: response has no paths", RESTORE_ROOT.casefold() in json.dumps(body).casefold(), False)
+    check("delete: quarantine record removed from the local db",
+          any(r["id"] == mid for r in db.list_quarantine_records()), False)
+    check("delete: real findings for the program removed, simulated + other programs kept",
+          ([tuple(r) for r in findings_for(name)], len(findings_for("other.exe"))), ([(1,)], 1))
+    check("delete: audit records the deletion",
+          any(e["message"] == f"Permanently deleted {name} from quarantine and cleared its local records"
+              for e in db.get_audit_events(200)), True)
+    check("delete: second delete refused", delete(mid)[1]["message"], "Quarantine record not found.")
+    check_restore("delete: restore after delete refused", mid, 404, "Quarantine record not found.")
+
+    mid, qp, _ = fake_record(qdir=OUTSIDE)
+    code, body = delete(mid)
+    check("delete: path outside quarantine folder refused, file untouched",
+          (code, body["message"], os.path.isfile(qp)), (403, "Safety Override: Quarantine path is invalid.", True))
+    mid, _, _ = fake_record(is_simulated=True)
+    check("delete: simulated record", delete(mid)[:1] + (delete(mid)[1]["message"],), (400, "Simulated threat: nothing to delete."))
+    check("delete: missing record", delete(999999)[1]["message"], "Quarantine record not found.")
+    mid, _, _ = fake_record(status="restored")
+    check("delete: wrong status", delete(mid)[1]["message"], "Not in quarantine (status: restored).")
 finally:
     db.close()
     shutil.rmtree(RESTORE_ROOT, ignore_errors=True)

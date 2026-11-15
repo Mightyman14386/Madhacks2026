@@ -1,15 +1,18 @@
 import {arcSampler,visibleRoutes} from "./routeGeometry";
 import {useEffect,useRef,useState} from "react";
-import {geoOrthographic,geoPath,geoGraticule10,geoRotation} from "d3-geo";
+import {geoOrthographic,geoPath,geoGraticule10,geoRotation,geoContains} from "d3-geo";
 import {feature,mesh} from "topojson-client";
 import world from "world-atlas/countries-110m.json";
 import {hasCoordinates,routeColor} from "./data";
+import {countryFeatures,featureByCode} from "./countries";
 const land=feature(world,world.objects.countries), borders=mesh(world,world.objects.countries,(a,b)=>a!==b);
 const RAD=Math.PI/180;
-export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}) {
- const canvas=useRef(null), view=useRef({rotation:[50,-20,0],zoom:1}), props=useRef(), drag=useRef(null), hits=useRef([]);
+// onCountrySelect is optional: when given (device-traffic globe), clicking a country selects it for geofencing.
+export default function Globe({routes,origin,selected,onSelect,rotate,setRotate,onCountrySelect,selectedCountry,blockedCountries}) {
+ const canvas=useRef(null), view=useRef({rotation:[50,-20,0],zoom:1}), props=useRef(), drag=useRef(null), hits=useRef([]), frameGeo=useRef(null);
  const [hover,setHover]=useState(null);
- props.current={routes:routes.map(r=>({...r,sample:arcSampler({...r,observedOrigin:r.observedOrigin||origin})})),origin,selected,onSelect,rotate};
+ props.current={routes:routes.map(r=>({...r,sample:arcSampler({...r,observedOrigin:r.observedOrigin||origin})})),origin,selected,onSelect,rotate,
+  selectedCountry:onCountrySelect?selectedCountry:null,blockedCountries:onCountrySelect?(blockedCountries||[]):[]};
  useEffect(()=>{
   const el=canvas.current,ctx=el.getContext("2d");if(!ctx)return;
   let frame,old=performance.now(),last=0,width=0,height=0;
@@ -26,6 +29,7 @@ export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}
    const dpr=Math.min(devicePixelRatio,2);ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);
    const projection=geoOrthographic().translate([cx,cy]).scale(radius).rotate(v.rotation).clipAngle(90);
    const path=geoPath(projection,ctx),rotation=geoRotation(v.rotation);
+   frameGeo.current={projection,cx,cy,radius};
    const project=(coord,elevation=1)=>{
     const [lng,lat]=rotation(coord).map(a=>a*RAD);
     const z=Math.cos(lat)*Math.cos(lng);
@@ -38,6 +42,8 @@ export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}
    ctx.beginPath();path(geoGraticule10());ctx.strokeStyle="#d4e1e512";ctx.lineWidth=.55;ctx.stroke();
    ctx.beginPath();path(land);ctx.fillStyle="#d5e2e506";ctx.fill();ctx.strokeStyle="#f2f4f7a6";ctx.lineWidth=.8;ctx.stroke();
    ctx.beginPath();path(borders);ctx.strokeStyle="#ffffff7c";ctx.lineWidth=.55;ctx.stroke();
+   for(const code of current.blockedCountries){const f=featureByCode.get(code);if(!f)continue;ctx.beginPath();path(f);ctx.fillStyle="#e7a1ad2e";ctx.fill();ctx.strokeStyle="#e7a1ad99";ctx.lineWidth=.9;ctx.stroke();}
+   if(current.selectedCountry){const f=featureByCode.get(current.selectedCountry);if(f){ctx.beginPath();path(f);ctx.fillStyle="#9ccdc126";ctx.fill();ctx.strokeStyle="#9ccdc1";ctx.lineWidth=1.4;ctx.stroke();}}
    hits.current=[];
    function dot(p,color,size=2.5){if(p.z<0)return;ctx.save();ctx.shadowBlur=14;ctx.shadowColor=color;ctx.fillStyle=color;ctx.beginPath();ctx.arc(p.x,p.y,size,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;ctx.strokeStyle=color+"50";ctx.beginPath();ctx.arc(p.x,p.y,size+5,0,Math.PI*2);ctx.stroke();ctx.restore();}
    const plotted=visibleRoutes(current.routes,current.selected);
@@ -64,18 +70,26 @@ export default function Globe({routes,origin,selected,onSelect,rotate,setRotate}
  },[]);
  useEffect(()=>{const route=routes.find(r=>r.id===selected);if(hasCoordinates(route)){view.current.rotation=[-route.lng,-route.lat,0];}},[selected]);
  const point=e=>{const rect=canvas.current.getBoundingClientRect();return [e.clientX-rect.left,e.clientY-rect.top];};
+ // Country under a screen point (front hemisphere only), or null.
+ const pickCountry=(x,y)=>{
+  const g=frameGeo.current;if(!g||Math.hypot(x-g.cx,y-g.cy)>g.radius)return null;
+  const coord=g.projection.invert([x,y]);if(!coord||coord.some(Number.isNaN))return null;
+  return countryFeatures.find(c=>geoContains(c.feature,coord))||null;
+ };
  const move=e=>{
   if(drag.current){const d=drag.current;const dx=e.clientX-d.x,dy=e.clientY-d.y;if(Math.abs(dx)+Math.abs(dy)>3)d.moved=true;view.current.rotation=[d.rotation[0]+dx*.3,Math.max(-85,Math.min(85,d.rotation[1]-dy*.3)),0];return;}
-  const [x,y]=point(e),hit=hits.current.find(h=>Math.hypot(h.x-x,h.y-y)<12);setHover(hit?{x,y,route:hit.route}:null);
+  const [x,y]=point(e),hit=hits.current.find(h=>Math.hypot(h.x-x,h.y-y)<12);
+  if(hit){setHover({x,y,route:hit.route});return;}
+  const country=onCountrySelect?pickCountry(x,y):null;setHover(country?{x,y,country}:null);
  };
  return <div className="globe-wrap">
   <canvas ref={canvas} tabIndex={0} role="img" aria-label="Interactive globe of approximate connection locations. Drag or use arrow keys to rotate. Plus and minus zoom. Select a connection from the list for accessible details."
    onPointerDown={e=>{drag.current={x:e.clientX,y:e.clientY,rotation:[...view.current.rotation],moved:false};canvas.current.setPointerCapture(e.pointerId);setRotate(false);setHover(null);}}
-   onPointerMove={move} onPointerUp={e=>{if(drag.current&&!drag.current.moved){const [x,y]=point(e),hit=hits.current.find(h=>Math.hypot(h.x-x,h.y-y)<12);if(hit)onSelect(hit.route.id);}drag.current=null;}}
+   onPointerMove={move} onPointerUp={e=>{if(drag.current&&!drag.current.moved){const [x,y]=point(e),hit=hits.current.find(h=>Math.hypot(h.x-x,h.y-y)<12);if(hit)onSelect(hit.route.id);else if(onCountrySelect){const c=pickCountry(x,y);if(c)onCountrySelect({code:c.code,name:c.name});}}drag.current=null;}}
    onPointerCancel={()=>{drag.current=null;}} onPointerLeave={()=>setHover(null)}
    onKeyDown={e=>{if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","+","=","-"].includes(e.key)){e.preventDefault();setRotate(false);if(e.key.startsWith("Arrow")){view.current.rotation[0]+=(e.key==="ArrowRight"?8:e.key==="ArrowLeft"?-8:0);view.current.rotation[1]=Math.max(-85,Math.min(85,view.current.rotation[1]+(e.key==="ArrowUp"?8:e.key==="ArrowDown"?-8:0)));}else view.current.zoom=Math.max(.65,Math.min(1.45,view.current.zoom+(e.key==="-"?-.1:.1)));}}}/>
-  {hover&&<div className="globe-tooltip" style={{left:Math.min(hover.x+12,canvas.current.clientWidth-200),top:hover.y-44}}><strong>{hover.route.kind==="incident"?hover.route.severity+" incident":hover.route.country_name||"Unknown location"}</strong><span>{hover.route.kind==="incident"?hover.route.ip:hover.route.process_name}</span></div>}
+  {hover&&<div className="globe-tooltip" style={{left:Math.min(hover.x+12,canvas.current.clientWidth-200),top:hover.y-44}}>{hover.country?<><strong>{hover.country.name}</strong><span>{hover.country.code?(blockedCountries||[]).includes(hover.country.code)?"Geofenced · click to manage":"Click to geofence":"No ISO code · can't geofence"}</span></>:<><strong>{hover.route.kind==="incident"?hover.route.severity+" incident":hover.route.country_name||"Unknown location"}</strong><span>{hover.route.kind==="incident"?hover.route.ip:hover.route.process_name}</span></>}</div>}
   <div className="globe-controls"><button aria-label="Zoom in" onClick={()=>view.current.zoom=Math.min(1.45,view.current.zoom+.1)}>+</button><button aria-label="Zoom out" onClick={()=>view.current.zoom=Math.max(.65,view.current.zoom-.1)}>−</button><span/><button className={rotate?"active":""} aria-pressed={rotate} onClick={()=>setRotate(!rotate)}>↻ <span>Rotate</span></button><button aria-label="Reset globe view" onClick={()=>{view.current={rotation:[50,-20,0],zoom:1};onSelect(null);}}>⌖</button></div>
-  <div className="globe-instruction">DRAG TO EXPLORE <span>·</span> SELECT A CONNECTION TO FOCUS</div>
+  <div className="globe-instruction">DRAG TO EXPLORE <span>·</span> SELECT A CONNECTION TO FOCUS{onCountrySelect&&<><span>·</span> CLICK A COUNTRY TO GEOFENCE</>}</div>
  </div>;
 }

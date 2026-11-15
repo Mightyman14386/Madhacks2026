@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 import config
 import connections
 import db
+import events
 import firewall
 import geo
 import geo_ranges
@@ -146,6 +147,25 @@ def _blocked():
     return set(db.get_blocked_regions())
 
 
+def _observed_ips(entry):
+    """IPs connected now plus IPs seen in the last 15 minutes for this country."""
+    entry = entry or {}
+    return set(entry.get("real_ips") or ()) | set(entry.get("recent_ips") or ())
+
+
+BLOCKED_IPS_SHOWN = 50
+
+
+def _describe_ips(ips):
+    """Blocked public IPs with location/provider and the process that last used them (for the UI)."""
+    out = []
+    for ip in sorted(ips, key=firewall._sort_key)[:BLOCKED_IPS_SHOWN]:
+        g = geo.geolocate(ip) or {}
+        out.append({"ip": ip, "city": g.get("city"), "country_code": g.get("country_code"),
+                    "asn_org": g.get("asn_org"), "process": connections.recent_process_for(ip)})
+    return out
+
+
 def _reset_to(entry, ips):
     """Reset real TCP connections in `entry` whose remote IP is in `ips`. Returns the count."""
     if not ips:
@@ -167,6 +187,47 @@ def _parse_ts(value):
 def _sync_error(message):
     _sync["errors"].append(message)
     log.warning("Geofence sync: %s", message)
+
+
+# ---------------------------------------------------------------- live op events
+_op = None  # op currently running under _lock
+
+
+def _s(step_name, message, status="running", data=None):
+    events.step(_op, step_name, message, status, data)
+
+
+def _finish_op(kind, status, body):
+    global _op
+    ok = bool(body.get("ok"))
+    data = {k: body[k] for k in ("ip_count", "rule_name") if body.get(k) is not None}
+    if "reset_connections" in body:
+        data["reset_count"] = body["reset_connections"]
+    events.end_op(_op, ok, body.get("message"), data or None)
+    body["op_id"] = _op
+    if ok and _op:
+        events.emit_connections_changed(kind)
+    _op = None
+    return status, body
+
+
+def _run_op(kind, target, fn, *args):
+    global _op
+    _op = events.start_op(kind, target)
+    try:
+        status, body = fn(*args)
+    except Exception:
+        log.exception("%s failed unexpectedly", kind)
+        status, body = 500, {"ok": False, "message": "Unexpected error. See server log."}
+    return _finish_op(kind, status, body)
+
+
+def _sync_event(cc, step_name, message, data=None):
+    """A background change (TTL expiry, new IPs, orphan removal) as a one-step 'sync' op."""
+    op = events.start_op("sync", {"country_code": cc})
+    events.step(op, step_name, message, "ok", data)
+    events.end_op(op, True, message, data)
+    events.emit_connections_changed("sync")
 
 
 def _safe(fn, *args):
@@ -192,7 +253,7 @@ def _country_notes(cname):
 def _preview_body(code, by_country, scope="observed", range_info=None, ranges_cached=False):
     entry = by_country.get(code) or {}
     cname = country_name(code, by_country)
-    allowed, skipped = firewall.filter_ips(entry.get("real_ips") or [])
+    allowed, skipped = firewall.filter_ips(_observed_ips(entry))
     mode = _mode()
     if scope == "country" and range_info is not None:
         v4 = range_info.get("v4") or []
@@ -241,6 +302,8 @@ def _preview_body(code, by_country, scope="observed", range_info=None, ranges_ca
         "already_blocked": code in _blocked(),
         "ip_count": len(allowed),
         "ips": allowed,  # public, already sorted; private/gateway/DNS never included
+        # IPs seen in the last 15 minutes but not connected right now (also blocked)
+        "recent_ip_count": len([ip for ip in allowed if ip not in set(entry.get("real_ips") or ())]),
         "skipped_counts": dict(sorted(Counter(s["reason"] for s in skipped).items())),
         "real_connections_affected": entry.get("real_conn_count", 0),
         "simulated_connections_affected": entry.get("simulated_conn_count", 0),
@@ -341,7 +404,7 @@ def _block(country_code, confirm, scope="observed", preloaded=None):
         return 409, {"ok": False, "message": "Region already geofenced."}
 
     name = country_name(code, by_country)
-    allowed, _ = firewall.filter_ips((by_country.get(code) or {}).get("real_ips") or [])
+    allowed, _ = firewall.filter_ips(_observed_ips(by_country.get(code)))
 
     if sc == "country":
         all_cidrs = list(range_info.get("v4") or []) + list(range_info.get("v6") or [])
@@ -383,15 +446,29 @@ def _block(country_code, confirm, scope="observed", preloaded=None):
             "command_display": result.get("command_display"), "reset_connections": reset,
         }
 
+    _s("collecting IPs", f"{len(allowed)} public IPs seen for {name}.", "ok", {"ip_count": len(allowed)})
+    _s("applying rule", "Sending the firewall rule.", "running", {"rule_name": firewall.rule_name(code)})
     result = firewall.apply_rule(code, allowed)
     if not result.get("ok"):
         db.append_audit_event("geofence_failed", "high", f"Geofence failed for {name}", code)
+        _s("applying rule", "Firewall rule could not be created.", "failed")
         return 500, {"ok": False, "message": "Firewall rule could not be created."}
+    _s("rule applied", result.get("message"), "ok", {"rule_name": result.get("rule_name")})
 
     mode = "dry_run" if result.get("dry_run") else "enforced"
     ip_count = result.get("ip_count", len(allowed))
     expires_at = _expires_at()
+    _s("resetting connections", "Resetting existing connections to the blocked IPs.")
     reset = _reset_to(by_country.get(code), set(allowed))
+    _s("resetting connections", f"{reset} connection(s) reset.", "ok", {"reset_count": reset})
+    if mode == "dry_run":
+        _s("verified", "Dry run: rule not sent.", "ok")
+    elif ip_count == 0:
+        _s("verified", "No real IPs yet; the rule will be created when one appears.", "ok")
+    else:
+        present = firewall.rule_exists(code)
+        _s("verified", "Firewall rule is present." if present else "Firewall rule not found after applying.",
+           "ok" if present else "failed", {"rule_name": result.get("rule_name")})
     db.append_geofence_event(
         "block", code, allowed, result.get("rule_name"), mode == "enforced",
         result.get("command_display"), None,
@@ -420,8 +497,19 @@ def _block(country_code, confirm, scope="observed", preloaded=None):
     }
 
 
+def _block_op(country_code, confirm, scope="observed", preloaded=None):
+    """Run _block as a live op. An op is started only for a confirmed request with a valid code;
+    validation/confirmation failures return op_id null."""
+    code = firewall.validate_cc(country_code)
+    if code is None or confirm is not True or _validate_scope(scope) is None:
+        status, body = _block(country_code, confirm, scope, preloaded)
+        body["op_id"] = None
+        return status, body
+    return _run_op("geofence", {"country_code": code}, _block, country_code, confirm, scope, preloaded)
+
+
 def block(country_code, confirm, scope="observed"):
-    return _safe(_block, country_code, confirm, scope)
+    return _safe(_block_op, country_code, confirm, scope)
 
 
 async def block_async(country_code, confirm, scope="observed"):
@@ -433,8 +521,8 @@ async def block_async(country_code, confirm, scope="observed"):
             preloaded = await asyncio.to_thread(_load_country_ranges, code)
         except Exception:
             log.exception("Async range build failed")
-            return 500, {"ok": False, "message": "Unexpected error. See server log."}
-    return _safe(_block, country_code, confirm, scope, preloaded)
+            return 500, {"ok": False, "message": "Unexpected error. See server log.", "op_id": None}
+    return _safe(_block_op, country_code, confirm, scope, preloaded)
 
 
 # ---------------------------------------------------------------- undo
@@ -453,13 +541,24 @@ def _undo(country_code=None):
             return 409, {"ok": False, "message": "Region is not geofenced."}
 
     name = country_name(code)
+    global _op
+    _op = events.start_op("undo_geofence", {"country_code": code})
+    _s("removing rule", f"Removing the geofence for {name}.")
     result = firewall.remove_rule(code)
     if not result.get("ok"):
         # Stays blocked (no unblock row) so the user can retry.
         db.append_audit_event("geofence_failed", "high", f"Could not remove geofence {name}", code)
+        _s("removing rule", "Firewall rule could not be removed.", "failed")
         return 500, {"ok": False, "message": "Firewall rule could not be removed."}
+    _s("removing rule", result.get("message"), "ok")
 
     mode = "dry_run" if result.get("dry_run") else "enforced"
+    if mode == "dry_run":
+        _s("verified gone", "Dry run: no rule was sent, nothing to remove.", "ok")
+    else:
+        gone = not firewall.rule_exists(code)
+        _s("verified gone", "Firewall rule is gone." if gone else "Firewall rule still present.",
+           "ok" if gone else "failed")
     db.append_geofence_event(
         "unblock", code, [], result.get("rule_name"), mode == "enforced",
         result.get("command_display"), None, ip_count=0, mode=mode, source="user",
@@ -469,8 +568,20 @@ def _undo(country_code=None):
     return 200, {"ok": True, "message": f"Geofence removed for {name}.", "country_code": code, "mode": mode}
 
 
+def _undo_op(country_code=None):
+    """Run _undo; _undo starts the op itself once the target is known (validation failures: op_id null)."""
+    global _op
+    _op = None
+    try:
+        status, body = _undo(country_code)
+    except Exception:
+        log.exception("Undo failed")
+        status, body = 500, {"ok": False, "message": "Unexpected error. See server log."}
+    return _finish_op("undo_geofence", status, body)
+
+
 def undo(country_code=None):
-    return _safe(_undo, country_code)
+    return _safe(_undo_op, country_code)
 
 
 # ---------------------------------------------------------------- state
@@ -509,6 +620,7 @@ def _state():
             "seconds_remaining": None if exp is None else max(0, int((exp - now).total_seconds())),
             # live from the in-memory map (grows as the sync adds new IPs)
             "ip_count": len(mem["ips"]) if "ips" in mem else (r.get("ip_count") or 0),
+            "blocked_ips": _describe_ips(mem.get("ips") or ()),
             "mode": r.get("mode") or mem.get("mode") or ("enforced" if r.get("enforced") else "dry_run"),
             "rule_present": None if dry else (cc in rule_ccs),
         })
@@ -559,6 +671,7 @@ def _sync_ttl(now):
                 result.get("command_display"), "TTL expired", ip_count=0, mode=mode, source="ttl",
             )
             db.append_audit_event("geofence_unblock", "info", f"Geofence for {name} expired", cc)
+            _sync_event(cc, "ttl expired", f"Geofence for {name} expired")
             _active.pop(cc, None)
             _ttl_failure_logged.discard(cc)
         except Exception as e:
@@ -571,7 +684,7 @@ def _sync_new_ips(by_country):
         try:
             if (entry.get("scope") or "observed") == "country":
                 continue  # country-wide rules already cover the country's entire IP space
-            current = (by_country.get(cc) or {}).get("real_ips") or set()
+            current = _observed_ips(by_country.get(cc))
             known = set(entry.get("ips") or set())
             if not (set(current) - known):
                 continue
@@ -588,6 +701,8 @@ def _sync_new_ips(by_country):
             suffix = " (dry-run)" if result.get("dry_run") else ""
             db.append_audit_event("geofence_update", "info",
                                   f"Geofence {country_name(cc)}: blocked {len(added)} new IPs{suffix}", cc)
+            _sync_event(cc, "new IPs added", f"Geofence {country_name(cc)}: blocked {len(added)} new IPs{suffix}",
+                        {"ip_count": len(entry["ips"])})
         except Exception as e:
             _sync_error(f"New-IP update failed for {cc}: {type(e).__name__}")
 
@@ -605,6 +720,7 @@ def _sync_orphans():
         try:
             if firewall.remove_rule(cc).get("ok"):
                 db.append_audit_event("geofence_orphan", "info", f"Removed orphan rule {r['name']}", cc)
+                _sync_event(cc, "orphan removed", f"Removed orphan rule {r['name']}", {"rule_name": r["name"]})
             else:
                 _sync_error(f"Could not remove orphan rule {r['name']}.")
         except Exception as e:

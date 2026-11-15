@@ -57,20 +57,24 @@ class FakeAPI:
 
 
 class FakeTable(FakeAPI):
-    """Emulates geospatial_incidents + the INSERT ... WHERE NOT EXISTS on (ip, rounded coords)."""
+    """Emulates geospatial_incidents + the INSERT ... WHERE NOT EXISTS on (ip, rounded coords, device)."""
     def __init__(self):
         super().__init__()
         self.keys = set()
 
     def execute_statement(self, **kw):
         self.calls.append(kw)
-        by_row = {}
+        by_row, tag = {}, None
         for p in kw["parameters"]:
+            if p.name == "device_tag":
+                tag = p.value
+                continue
             col, idx = p.name.rsplit("_", 1)
             by_row.setdefault(int(idx), {})[col] = float(p.value) if p.type == "DOUBLE" else p.value
         inserted = 0
         for row in by_row.values():
-            key = dx.dedupe_key(row)
+            assert row["description"].endswith(tag), "row description must carry the device tag"
+            key = dx.dedupe_key(row) + (tag,)
             if key not in self.keys:
                 self.keys.add(key)
                 inserted += 1
@@ -104,10 +108,10 @@ check("map: src = origin, dest = remote location",
 check("map: severity and ip", (row["severity"], row["ip"]), ("medium", "203.0.113.66"))
 check("map: description",
       row["description"],
-      "payload.exe -> 203.0.113.66:1337 (Shenzhen, CN): Connected over port 1337.; Started from PowerShell.")
+      "payload.exe -> 203.0.113.66:1337 (Shenzhen, CN): Connected over port 1337.; Started from PowerShell." + dx.device_tag())
 text = json.dumps(row)
 check("map: no paths, local IP, cmdline or username", any(s in text for s in ("C:\\", "secretname", "192.168.1.50", "--x")), False)
-check("map: simulated suffix", dx.to_incident_row({**FINDING, "is_simulated": True}, ORIGIN)["description"].endswith(" [simulated]"), True)
+check("map: simulated suffix", dx.to_incident_row({**FINDING, "is_simulated": True}, ORIGIN)["description"].endswith(" [simulated]" + dx.device_tag()), True)
 check("map: safe connection exported too", dx.to_incident_row({**FINDING, "status": "safe", "severity": "low"}, ORIGIN)["severity"], "low")
 check("map: no coordinates (anycast/unlocated) skipped", dx.to_incident_row({**FINDING, "lat": None}, ORIGIN), None)
 check("map: non-finite coordinate skipped", dx.to_incident_row({**FINDING, "lng": float("nan")}, ORIGIN), None)
@@ -124,7 +128,7 @@ check("insert: targets warehouse/catalog/schema",
 check("insert: SQL has named placeholders, no literal values",
       (":latitude_src_0" in call["statement"], ":ip_1" in call["statement"],
        "203.0.113.66" in call["statement"], "payload.exe" in call["statement"]), (True, True, False, False))
-check("insert: 7 parameters per row", len(call["parameters"]), 14)
+check("insert: 7 parameters per row + device tag", len(call["parameters"]), 15)
 types_by_name = {p.name: p.type for p in call["parameters"]}
 check("insert: coords DOUBLE, text STRING",
       (types_by_name["latitude_dest_0"], types_by_name["severity_0"], types_by_name["ip_1"]), ("DOUBLE", "STRING", "STRING"))
@@ -147,7 +151,7 @@ check("dedupe: same IP + same/near coords collapsed; other point or IP kept",
       (len(uniq), dropped, uniq[1]["latitude_dest"], uniq[2]["ip"]), (3, 2, far["latitude_dest"], "203.0.113.67"))
 
 table = FakeTable()
-table.keys.add(dx.dedupe_key(row))
+table.keys.add(dx.dedupe_key(row) + (dx.device_tag(),))
 dx._state["duplicates_skipped"] = 0
 with mock.patch.object(dx, "_client", fake_client(table)):
     check("insert: returns num_inserted_rows from Databricks", dx.insert_incidents([row, other_ip]), 1)
@@ -225,7 +229,7 @@ try:
     sent = {p.name: p.value for p in table.calls[-1]["parameters"]}
     sim_idx = next(k.rsplit("_", 1)[1] for k, v in sent.items() if v == "203.0.113.66")
     check("simulated: uses planted geo and [simulated] tag",
-          (sent[f"latitude_dest_{sim_idx}"], sent[f"description_{sim_idx}"].endswith("[simulated]")), ("22.5431", True))
+          (sent[f"latitude_dest_{sim_idx}"], sent[f"description_{sim_idx}"].endswith("[simulated]" + dx.device_tag())), ("22.5431", True))
 
     # Failure: nothing stamped; next pass retries.
     fresh("fail")
@@ -270,6 +274,17 @@ try:
           + (sent["severity_0"],),
           (float(ORIGIN["lat"]), float(ORIGIN["lng"]), 39.0438, -77.4874, "low"))
     check("observe: re-pass does not duplicate", sync(table), 0)
+    with mock.patch.object(config, "DEVICE_NAME", "OTHER-LAPTOP"):
+        dx._observed.clear()
+        with mock.patch.object(config, "DATABRICKS_EXPORT_ENABLED", True):
+            dx.observe_connections([safe], ORIGIN)
+        check("observe: same route from another device is still added", sync(table), 1)
+        check("observe: description tagged with device", table.calls[-1]["parameters"][5].value.endswith(" @OTHER-LAPTOP"), True)
+    with mock.patch.object(config, "DATABRICKS_EXPORT_ENABLED", True):
+        dx._observed.clear()
+        dx.observe_connections([safe, dict(safe, process_name="evil.exe", remote_ip="5.5.5.5")], ORIGIN)
+    check("forget: deleted program dropped from export queue, others kept",
+          (dx.forget_process("evil.exe"), [r["ip"] for r in dx._observed.values()]), (1, ["8.8.4.4"]))
     dx._observed.clear()
 finally:
     db.close()

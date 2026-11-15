@@ -41,6 +41,20 @@ IPS_BY_COUNTRY_TTL_SECONDS = 3.0
 _ips_by_country_cache = None
 _ips_by_country_lock = threading.Lock()
 
+# Short memory of public IPs seen per country, so a geofence also covers servers a page used a moment ago
+# (connections close quickly; blocking only what's open *right now* misses them).
+RECENT_IP_SECONDS = 15 * 60
+_recent_ips = {}  # cc -> {ip: (last_seen_monotonic, process_name)}; guarded by _ips_by_country_lock
+
+
+def recent_process_for(ip):
+    """Process name that last used `ip` (from the recent memory), or None."""
+    with _ips_by_country_lock:
+        for ips in _recent_ips.values():
+            if ip in ips:
+                return ips[ip][1]
+    return None
+
 
 # ---------------------------------------------------------------- blocked regions
 
@@ -185,8 +199,17 @@ def _collect(warnings):
 
 
 def _new_country_entry():
-    return {"real_ips": set(), "real_conn_count": 0, "simulated_conn_count": 0,
+    return {"real_ips": set(), "recent_ips": set(), "real_conn_count": 0, "simulated_conn_count": 0,
             "country_name": None, "conns": []}
+
+
+def _process_name(pid, cache):
+    if pid not in cache:
+        try:
+            cache[pid] = psutil.Process(pid).name() if pid else None
+        except Exception:
+            cache[pid] = None
+    return cache[pid]
 
 
 def _summarize_by_country():
@@ -202,6 +225,8 @@ def _summarize_by_country():
       used by firewall.reset_tcp_connections and never returned by any API.
     """
     out = {}
+    now = time.monotonic()
+    names = {}
     try:
         raw = psutil.net_connections(kind="inet")
     except Exception as e:
@@ -219,6 +244,7 @@ def _summarize_by_country():
             entry["country_name"] = entry["country_name"] or g.get("country_name")
             entry["real_ips"].add(c.raddr.ip)
             entry["real_conn_count"] += 1
+            _recent_ips.setdefault(cc, {})[c.raddr.ip] = (now, _process_name(c.pid, names))
             if c.type == socket.SOCK_STREAM:
                 entry["conns"].append({
                     "local_ip": c.laddr.ip, "local_port": c.laddr.port,
@@ -227,6 +253,18 @@ def _summarize_by_country():
                 })
         except Exception:
             continue
+
+    # Recent memory: forget IPs not seen for RECENT_IP_SECONDS, then expose the rest per country.
+    for cc in list(_recent_ips):
+        ips = {ip: v for ip, v in _recent_ips[cc].items() if now - v[0] < RECENT_IP_SECONDS}
+        if ips:
+            _recent_ips[cc] = ips
+            entry = out.setdefault(cc, _new_country_entry())
+            entry["recent_ips"] = set(ips)
+            if not entry["country_name"]:
+                entry["country_name"] = (geo.geolocate(next(iter(ips))) or {}).get("country_name")
+        else:
+            del _recent_ips[cc]
 
     try:
         for p in scenarios.get_planted_connections():
@@ -249,7 +287,8 @@ def current_ips_by_country():
             cached = (time.monotonic(), _summarize_by_country())
             _ips_by_country_cache = cached
         summary = cached[1]
-    return {cc: {**v, "real_ips": set(v["real_ips"]), "conns": [dict(x) for x in v["conns"]]}
+    return {cc: {**v, "real_ips": set(v["real_ips"]), "recent_ips": set(v.get("recent_ips") or ()),
+                 "conns": [dict(x) for x in v["conns"]]}
             for cc, v in summary.items()}
 
 

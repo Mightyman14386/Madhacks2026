@@ -78,7 +78,8 @@ patches = [
     mock.patch.object(firewall, "reset_tcp_connections", fake_reset),
     mock.patch.object(firewall, "get_rules", lambda: []),
     mock.patch.object(connections, "current_ips_by_country", lambda: json.loads(json.dumps(
-        {k: {**v, "real_ips": sorted(v["real_ips"])} for k, v in FAKE_BY_COUNTRY.items()}))),
+        {k: {**v, "real_ips": sorted(v["real_ips"]), "recent_ips": sorted(v.get("recent_ips") or ())}
+         for k, v in FAKE_BY_COUNTRY.items()}))),
     mock.patch.object(config, "ENFORCE_FIREWALL", False),
     mock.patch.object(config, "KILL_ON_GEOFENCE", False),
     mock.patch.object(config, "RESET_CONNECTIONS_ON_GEOFENCE", False),
@@ -139,7 +140,9 @@ try:
     check("state: mode fields", (st["mode"], st["enforce_firewall"], st["ttl_minutes"], st["is_admin"]),
           ("dry_run", False, config.RULE_TTL_MINUTES, False))
     check("state: no local/gateway/DNS IPs", any(ip in json.dumps(st) for ip in ("10.0.0.9", GATEWAY, DNS)), False)
-    check("block: second block -> 409", geofence.block("DE", True), (409, {"ok": False, "message": "Region already geofenced."}))
+    code, body = geofence.block("DE", True)
+    check("block: second block -> 409", (code, body["ok"], body["message"], body["op_id"].startswith("geofence-")),
+          (409, False, "Region already geofenced.", True))
     check("preview: already_blocked true after block", geofence.preview("DE")[1]["already_blocked"], True)
     check("connections: geofence_version bumped -> blocked regions read DE",
           connections.get_blocked_regions(), ["DE"])
@@ -147,9 +150,10 @@ try:
     code, body = geofence.undo("de")
     check("undo: 200", (code, body["message"], body["country_code"]), (200, "Geofence removed for Germany.", "DE"))
     check("state: empty after undo", blocked_codes(), [])
-    check("undo: again -> 409", geofence.undo("DE"), (409, {"ok": False, "message": "Region is not geofenced."}))
+    check("undo: again -> 409 (op_id null: failed before starting)", geofence.undo("DE"),
+          (409, {"ok": False, "message": "Region is not geofenced.", "op_id": None}))
     check("undo: no code and nothing active -> 409",
-          geofence.undo(), (409, {"ok": False, "message": "No active geofence to undo."}))
+          geofence.undo(), (409, {"ok": False, "message": "No active geofence to undo.", "op_id": None}))
     check("geofence_log rows kept (block + unblock appended, none deleted)", db.row_counts()["geofence_log"], 2)
 
     # ------------------------------------------------------------ failures
@@ -395,6 +399,28 @@ try:
     with mock.patch.object(firewall, "sweep_all", lambda: atexit_calls.append(1)):
         geofence.atexit_sweep()
     check("8C atexit: skipped after shutdown cleanup already ran", atexit_calls, [])
+
+    # ------------------------------------------------------------ recently seen IPs are blocked too
+    fresh("c_recent")
+    FAKE_BY_COUNTRY["IN"] = {"real_ips": {"1.0.0.40"}, "recent_ips": {"1.0.0.40", "1.0.0.41", "1.0.0.42", "10.0.0.7"},
+                             "real_conn_count": 1, "simulated_conn_count": 0, "country_name": "India", "conns": []}
+    _, pv = geofence.preview("IN")
+    check("recent: preview counts live + recent public IPs", (pv["ip_count"], pv["recent_ip_count"]), (3, 2))
+    check("recent: private recent IP never included", "10.0.0.7" in pv["ips"], False)
+    geofence.block("IN", True)
+    check("recent: block applies live + recent IPs", calls["apply"][-1], ("IN", ["1.0.0.40", "1.0.0.41", "1.0.0.42"]))
+    with mock.patch.object(connections, "recent_process_for", lambda ip: "chrome.exe"), \
+            mock.patch.object(geofence.geo, "geolocate",
+                              lambda ip: {"city": "Mumbai", "country_code": "IN", "asn_org": "Test ISP"}):
+        st = geofence.state()[1]
+    bl = st["blocked"][0]["blocked_ips"]
+    check("state: blocked_ips lists each server with location + process",
+          bl[0], {"ip": "1.0.0.40", "city": "Mumbai", "country_code": "IN", "asn_org": "Test ISP", "process": "chrome.exe"})
+    check("state: blocked_ips has no private/local IPs", any(x["ip"].startswith(("10.", "192.168.")) for x in bl), False)
+    calls["apply"].clear()
+    geofence.sync_once(datetime.now(timezone.utc))
+    check("recent: sync doesn't re-apply when nothing new", calls["apply"], [])
+    del FAKE_BY_COUNTRY["IN"]
 
     # ------------------------------------------------------------ reset_tcp_connections (SetTcpEntry mocked)
     import socket

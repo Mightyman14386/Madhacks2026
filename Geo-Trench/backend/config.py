@@ -1,6 +1,7 @@
 """Loads configuration from backend/.env with sane defaults."""
 from pathlib import Path
 import os
+import socket
 
 from dotenv import load_dotenv
 
@@ -84,6 +85,8 @@ PROTECTED_NAMES = frozenset({
 ORIGIN_NAME: str =os.getenv("ORIGIN_NAME", "Madison, WI").strip() or "Madison, WI"
 
 # Read-only Databricks incident feed. Authentication stays in the SDK default flow.
+CORS_ORIGINS: tuple = _csv("CORS_ORIGINS") or ("http://localhost:5173", "http://127.0.0.1:5173")
+
 DATABRICKS_WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID", "f281300984d67642").strip()
 DATABRICKS_REFRESH_SECONDS = max(5, _int("DATABRICKS_REFRESH_SECONDS", 30))
 DATABRICKS_MAX_ROWS = max(1, min(10000, _int("DATABRICKS_MAX_ROWS", 2000)))
@@ -92,3 +95,7 @@ DATABRICKS_QUERY_TIMEOUT = max(5, min(120, _int("DATABRICKS_QUERY_TIMEOUT", 45))
 DATABRICKS_EXPORT_ENABLED: bool = _bool("DATABRICKS_EXPORT_ENABLED", False)
 DATABRICKS_EXPORT_SIMULATED: bool = _bool("DATABRICKS_EXPORT_SIMULATED", False)
 DATABRICKS_EXPORT_SECONDS: float = max(5.0, _float("DATABRICKS_EXPORT_SECONDS", 30.0))  # full reconcile interval
+# Background collection so this device's connections export even when no browser polls /api/connections.
+DATABRICKS_COLLECT_SECONDS: float = max(2.0, _float("DATABRICKS_COLLECT_SECONDS", 5.0))
+# Tags each exported row so devices sharing an origin don't dedupe each other's routes away.
+DEVICE_NAME: str = (os.getenv("DEVICE_NAME", "") or socket.gethostname()).strip()[:64] or "device"

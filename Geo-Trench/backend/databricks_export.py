@@ -49,6 +49,11 @@ def _finite(value):
     return v if math.isfinite(v) else None
 
 
+def device_tag():
+    """Suffix identifying the exporting device; part of the table-side dedupe."""
+    return f" @{config.DEVICE_NAME}"
+
+
 def to_incident_row(conn, origin):
     """Map one located connection (safe or unsafe) to a geospatial_incidents row, or None to skip.
     Source = device origin, destination = the connection's GeoIP point: exactly what the device globe draws."""
@@ -62,11 +67,13 @@ def to_incident_row(conn, origin):
         description += f": {reasons}"
     if conn.get("is_simulated"):
         description += " [simulated]"
+    tag = device_tag()
+    description = description[:DESCRIPTION_MAX - len(tag)] + tag
     return {
         "latitude_src": coords[0], "longitude_src": coords[1],
         "latitude_dest": coords[2], "longitude_dest": coords[3],
         "severity": str(conn.get("severity") or "unknown").lower(),
-        "description": description[:DESCRIPTION_MAX],
+        "description": description,
         "ip": str(conn.get("remote_ip") or "")[:100],
     }
 
@@ -78,7 +85,7 @@ COORD_DECIMALS = 4  # ~11 m: coordinates equal at this precision count as the sa
 
 
 def dedupe_key(row):
-    """Redundancy key: IP + all four coordinates (rounded)."""
+    """Redundancy key: IP + all four coordinates (rounded). Rows are per device (see device_tag)."""
     return (str(row.get("ip") or ""),) + tuple(round(float(row[c]), COORD_DECIMALS) for c in COORD_COLUMNS)
 
 
@@ -105,12 +112,14 @@ def _build_statement(rows):
             is_coord = col.startswith(("latitude", "longitude"))
             params.append((name, str(row[col]), "DOUBLE" if is_coord else "STRING"))
         tuples.append("(" + ", ".join(names) + ")")
+    params.append(("device_tag", device_tag(), "STRING"))
     cols = ", ".join(TABLE_COLUMNS)
     same_point = " AND ".join(
         f"round(g.{c}, {COORD_DECIMALS}) = round(v.{c}, {COORD_DECIMALS})" for c in COORD_COLUMNS)
     sql = (f"INSERT INTO geospatial_incidents ({cols}) "
            f"SELECT {cols} FROM VALUES {', '.join(tuples)} AS v({cols}) "
-           f"WHERE NOT EXISTS (SELECT 1 FROM geospatial_incidents g WHERE g.ip = v.ip AND {same_point})")
+           f"WHERE NOT EXISTS (SELECT 1 FROM geospatial_incidents g WHERE g.ip = v.ip AND {same_point} "
+           f"AND endswith(g.description, :device_tag))")
     return sql, params
 
 
@@ -194,6 +203,19 @@ def observe_connections(connections, origin):
     if added:
         _wake.set()
     return added
+
+
+def forget_process(process_name):
+    """Stop re-sending a program's routes (e.g. after it was permanently deleted). Returns rows dropped.
+    Rows already in the Databricks table are left as they are."""
+    if not process_name:
+        return 0
+    prefix = f"{process_name} -> "
+    with _lock:
+        keys = [k for k, row in _observed.items() if row["description"].startswith(prefix)]
+        for k in keys:
+            del _observed[k]
+    return len(keys)
 
 
 def _flush_observed(wait_timeout):

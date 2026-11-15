@@ -5,15 +5,17 @@ import ctypes
 import logging
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import ancestry
 import config
 import connections
 import databricks_export
 import db
+import events
+import firewall
 import geo
 import geofence
 import incidents
@@ -81,6 +83,19 @@ async def _geofence_sync_loop():
         await asyncio.sleep(max(1.0, float(config.GEOFENCE_SYNC_SECONDS)))
 
 
+async def _export_collect_loop():
+    """Snapshot this device's connections on a timer so they reach Databricks even when no
+    frontend is polling /api/connections (e.g. only the incidents page is open). Never dies."""
+    while True:
+        try:
+            await asyncio.to_thread(connections.get_snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Export collection tick failed")
+        await asyncio.sleep(config.DATABRICKS_COLLECT_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     admin = is_admin()
@@ -125,13 +140,24 @@ async def lifespan(app: FastAPI):
 
     databricks_export.start()  # no-op unless DATABRICKS_EXPORT_ENABLED
     sync_task = asyncio.create_task(_geofence_sync_loop())
+    collect_task = None
+    if config.DATABRICKS_EXPORT_ENABLED:
+        collect_task = asyncio.create_task(_export_collect_loop())
+        log.info("Databricks export: ON as device '%s', collecting every %ss",
+                 config.DEVICE_NAME, config.DATABRICKS_COLLECT_SECONDS)
+    else:
+        log.warning("Databricks export: OFF (set DATABRICKS_EXPORT_ENABLED=true to send this device's connections)")
     log.info("Geofence sync running every %ss", config.GEOFENCE_SYNC_SECONDS)
     try:
         yield
     finally:
-        sync_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await sync_task
+        events.shutdown()  # FIRST: open event streams end, so run.py --stop never hangs
+        for task in (sync_task, collect_task):
+            if task is None:
+                continue
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         _cleanup_on_exit("server shutdown")
         await asyncio.to_thread(databricks_export.stop)  # stop worker + one short final flush
         try:
@@ -146,7 +172,7 @@ app = FastAPI(title="Geo-Trench", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=list(config.CORS_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -164,6 +190,46 @@ def health():
         "geoip_fallback": geo.geoip_is_fallback,
         "databricks_export": databricks_export.export_state(),
     }
+
+
+@app.get("/api/capabilities")
+def capabilities():
+    mode = firewall.enforcement_mode()
+    return {
+        "is_admin": is_admin(),
+        "firewall_mode": mode["mode"],
+        "firewall_mode_reason": mode["reason"],
+        "demo_mode": config.DEMO_MODE,
+        "geoip_fallback": geo.geoip_is_fallback,
+        "reset_connections_enabled": config.RESET_CONNECTIONS_ON_GEOFENCE,
+        "ttl_minutes": config.RULE_TTL_MINUTES,
+        "features": {"quarantine": True, "restore": True, "geofence": True,
+                     "stop_process": False,  # POST /api/process/stop is not implemented
+                     "events_stream": True},
+    }
+
+
+@app.get("/api/events/stream")
+async def events_stream(request: Request, last_id: str | None = None):
+    resume = events.parse_last_id(request.headers.get("last-event-id"), last_id)
+    return StreamingResponse(
+        events.sse_stream(request.is_disconnected, resume),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/events/recent")
+def events_recent(limit: int = 50):
+    return events.recent(limit)
+
+
+@app.get("/api/ops/{op_id}")
+def op_detail(op_id: str):
+    items = events.op_events(op_id)
+    if not items:
+        return JSONResponse(status_code=404, content={"ok": False, "message": "Operation not found."})
+    return {"ok": True, "op_id": op_id, "events": items}
 
 
 @app.get("/api/geo/test")
@@ -209,6 +275,12 @@ def post_quarantine(req: quarantine.QuarantineRequest):
 @app.post("/api/quarantine/restore")
 def post_quarantine_restore(req: quarantine.RestoreRequest):
     status, body = quarantine.restore_quarantined(req.manifest_id)
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.post("/api/quarantine/delete")
+def post_quarantine_delete(req: quarantine.RestoreRequest):
+    status, body = quarantine.delete_quarantined(req.manifest_id)
     return JSONResponse(status_code=status, content=body)
 
 

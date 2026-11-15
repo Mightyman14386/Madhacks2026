@@ -109,6 +109,10 @@ def _migrate(c):
     cols = {r["name"] for r in c.execute("PRAGMA table_info(quarantine_manifest)")}
     if "restored_at" not in cols:
         c.execute("ALTER TABLE quarantine_manifest ADD COLUMN restored_at TEXT")
+    # Permanent deletion from quarantine. Status stays 'quarantined' in the table (its CHECK can't be
+    # altered in place); deleted_at marks it, and list_quarantine_records reports status 'deleted'.
+    if "deleted_at" not in cols:
+        c.execute("ALTER TABLE quarantine_manifest ADD COLUMN deleted_at TEXT")
 
     # Databricks export bookkeeping: NULL = not yet sent.
     tf_cols = {r["name"] for r in c.execute("PRAGMA table_info(threat_findings)")}
@@ -385,9 +389,11 @@ def list_quarantine_records(limit=200):
     with _lock:
         rows = _rows(_db().execute(
             "SELECT id, ts, pid, process_name, original_path_redacted, sha256, status, "
-            "restored_at, is_simulated, note FROM quarantine_manifest ORDER BY id DESC LIMIT ?", (limit,)))
+            "restored_at, deleted_at, is_simulated, note FROM quarantine_manifest ORDER BY id DESC LIMIT ?", (limit,)))
     for r in rows:
         r["sha256_short"] = (r.pop("sha256") or "")[:8]
+        if r.get("deleted_at"):
+            r["status"] = "deleted"
     return rows
 
 def add_quarantine_record(pid, process_name, original_path_redacted, original_path_private,
@@ -429,6 +435,35 @@ def mark_quarantine_restored(record_id, file_name):
                   (now, "quarantine_restore", "info", f"Restored {file_name}", str(record_id)))
         c.commit()
         return True
+
+
+def mark_quarantine_deleted(record_id, file_name):
+    """After a permanent delete, remove the program from the local database, atomically:
+    its quarantine record (plus earlier restored/dry-run records of the same file, by sha256) and every
+    real threat finding for that process name. Appends one 'Permanently deleted <file_name>' audit event.
+    Only from a still-quarantined, not-yet-deleted record. file_name must be a bare name, never a path.
+    Returns {"manifest": n, "findings": n} on success, or None."""
+    with _lock:
+        c = _db()
+        rec = c.execute("SELECT process_name, sha256 FROM quarantine_manifest "
+                        "WHERE id = ? AND status = 'quarantined' AND deleted_at IS NULL", (record_id,)).fetchone()
+        if rec is None:
+            return None
+        process_name, sha256 = rec[0], rec[1]
+        removed_manifest = c.execute("DELETE FROM quarantine_manifest WHERE id = ?", (record_id,)).rowcount
+        if sha256:
+            removed_manifest += c.execute(
+                "DELETE FROM quarantine_manifest WHERE sha256 = ? AND id != ? "
+                "AND (status IN ('restored', 'dry_run') OR deleted_at IS NOT NULL)", (sha256, record_id)).rowcount
+        removed_findings = 0
+        if process_name:
+            removed_findings = c.execute(
+                "DELETE FROM threat_findings WHERE process_name = ? AND is_simulated = 0", (process_name,)).rowcount
+        c.execute("INSERT INTO audit_log (ts, type, severity, message, ref_id) VALUES (?,?,?,?,?)",
+                  (_now(), "quarantine_delete", "info",
+                   f"Permanently deleted {file_name} from quarantine and cleared its local records", str(record_id)))
+        c.commit()
+        return {"manifest": removed_manifest, "findings": removed_findings}
 
 
 def append_audit_event(event_type, severity, message, ref_id=None):
@@ -499,7 +534,7 @@ def purge_older_than(days=None):
             removed["threat_findings"] = c.execute(
                 "DELETE FROM threat_findings WHERE last_seen < ?", (cutoff,)).rowcount
             removed["quarantine_manifest"] = c.execute(
-                "DELETE FROM quarantine_manifest WHERE ts < ? AND status IN ('restored','dry_run')",
+                "DELETE FROM quarantine_manifest WHERE ts < ? AND (status IN ('restored','dry_run') OR deleted_at IS NOT NULL)",
                 (cutoff,)).rowcount
             removed["agent_actions"] = c.execute(
                 "DELETE FROM agent_actions WHERE ts < ?", (cutoff,)).rowcount

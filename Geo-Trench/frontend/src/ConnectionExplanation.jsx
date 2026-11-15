@@ -15,8 +15,10 @@ export default function ConnectionExplanation({item}){
  return <section className="connection-explanation" aria-label="Selected connection explanation" aria-live="polite">
   <div className="explanation-label">CONNECTION EXPLAINED <span>From backend data</span></div>
   <h3>{item.ip||item.remote_ip||item.process_name||"Selected connection"}</h3>
-  <p className="explanation-description">{description||"The backend did not provide a description or findings for this connection."}</p>
+  <p className="explanation-description">{description||(item.status==="safe"
+   ?`${item.process_name||"This app"} is talking to a server${item.country_name?" in "+item.country_name:""}${item.asn_org?" run by "+item.asn_org.replace(/\.+$/,""):""}. None of Geo-Trench's warning checks matched; the checks below show what was looked at.`
+   :"The backend did not provide a description or findings for this connection.")}</p>
   {!!matched.length&&<dl>{matched.map(([,name,text])=><div key={name}><dt>{name}</dt><dd>{text}</dd></div>)}</dl>}
-  <p className="explanation-context">{description?"This is what the backend reports for the connection you selected. It does not show the actual contents of the traffic.":"There is not enough information to explain why this connection occurred."}</p>
+  <p className="explanation-context">{description||item.status==="safe"?"This is based on what the backend reports for the connection you selected. It does not show the actual contents of the traffic.":"There is not enough information to explain why this connection occurred."}</p>
  </section>;
 }
