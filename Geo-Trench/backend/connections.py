@@ -17,6 +17,7 @@ import ancestry
 import config
 import db
 import geo
+import quarantine_guards
 import scenarios
 from threats import classify
 
@@ -55,35 +56,12 @@ def get_blocked_regions():
 
 # ---------------------------------------------------------------- protection
 
-def _norm_path(path):
-    try:
-        path = os.path.realpath(path)
-    except Exception:
-        pass
-    if path.startswith("\\\\?\\"):
-        path = path[4:]
-    return ntpath.normpath(path.replace("/", "\\")).casefold()
-
-
-_PROTECTED_ROOTS = tuple(ntpath.normpath(p).casefold() for p in config.PROTECTED_PATHS)
-
-
 def is_protected_process(raw_exe, pid, name):
-    """True if this process must never be quarantined or killed. Fails closed."""
-    try:
-        if pid in config.PROTECTED_PIDS or pid == os.getpid():
-            return True
-        if name and str(name).casefold() in config.PROTECTED_NAMES:
-            return True
-        if not raw_exe:
-            return True  # unknown location: fail closed
-        path = _norm_path(str(raw_exe))
-        for root in _PROTECTED_ROOTS:
-            if path == root or path.startswith(root + "\\"):
-                return True
-        return False
-    except Exception:
-        return True
+    """True if this process must never be quarantined or killed. Fails closed.
+
+    Delegates to quarantine_guards so there is one source of truth.
+    """
+    return quarantine_guards.is_protected_target(raw_exe, pid, name)
 
 
 # ---------------------------------------------------------------- helpers
@@ -133,9 +111,9 @@ def _live_sockets(warnings):
 
 # ---------------------------------------------------------------- snapshot
 
-def get_snapshot():
-    started = time.perf_counter()
-    warnings = []
+def _collect(warnings):
+    """Gather live + planted connections as internal records. Records INCLUDE raw_exe:
+    server-side only, never return them to a client as-is."""
     candidates = {}  # id -> record (dedupes identical tuples)
 
     proc_cache = {}  # pid -> (info, is_protected), once per request
@@ -144,7 +122,11 @@ def get_snapshot():
     def proc(pid):
         if pid not in proc_cache:
             info = ancestry.get_process_info(pid)
-            proc_cache[pid] = (info, is_protected_process(info.get("raw_exe"), pid, info.get("name")))
+            try:
+                create_time = psutil.Process(pid).create_time()
+            except Exception:
+                create_time = None
+            proc_cache[pid] = (info, is_protected_process(info.get("raw_exe"), pid, info.get("name")), create_time)
         return proc_cache[pid]
 
     def locate(ip):
@@ -157,9 +139,10 @@ def get_snapshot():
         cid = _conn_id(lip, lport, rip, rport, pid)
         if cid in candidates:
             continue
-        info, protected = proc(pid)
+        info, protected, create_time = proc(pid)
         candidates[cid] = {
             "id": cid, "pid": pid,
+            "create_time": create_time,  # server-side only; used to detect PID reuse
             "process_name": info.get("name") or "unknown",
             "exe": info.get("exe"),
             "raw_exe": info.get("raw_exe"),  # server-side only; stripped below
@@ -177,6 +160,7 @@ def get_snapshot():
             cid = _conn_id(p["local_ip"], p["local_port"], p["remote_ip"], p["remote_port"], p["pid"])
             candidates[cid] = {
                 "id": cid, "pid": p["pid"],
+                "create_time": None,
                 "process_name": p["process_name"],
                 "exe": p["exe"],
                 "raw_exe": p["raw_exe"],
@@ -190,6 +174,21 @@ def get_snapshot():
             }
     except Exception as e:
         warnings.append(f"Could not load demo scenarios: {type(e).__name__}")
+    return candidates
+
+
+def get_internal_connection(conn_id):
+    """Fresh server-side lookup of one current connection by id, including raw_exe.
+
+    Returns None if the connection is not currently open. For server-side decisions only.
+    """
+    return _collect([]).get(conn_id)
+
+
+def get_snapshot():
+    started = time.perf_counter()
+    warnings = []
+    candidates = _collect(warnings)
 
     first_seen = _touch_first_seen(candidates.keys())
     try:

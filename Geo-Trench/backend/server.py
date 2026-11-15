@@ -5,12 +5,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import ancestry
 import config
 import connections
 import db
 import geo
+import quarantine
 import scenarios
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -121,6 +123,30 @@ def process_test(pid: int):
 @app.get("/api/connections")
 def get_connections():
     return connections.get_snapshot()
+
+
+@app.post("/api/quarantine")
+def post_quarantine(req: quarantine.QuarantineRequest):
+    status, body = quarantine.quarantine_connection(req.conn_id)
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.post("/api/quarantine/restore")
+def post_quarantine_restore(req: quarantine.RestoreRequest):
+    status, body = quarantine.restore_quarantined(req.manifest_id)
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.get("/api/quarantine/list")
+def quarantine_list(limit: int = 200):
+    try:
+        return {"ok": True, "items": db.list_quarantine_records(limit)}
+    except Exception:
+        log.exception("quarantine list failed")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "message": "Unexpected error. See server log."},
+        )
 
 
 @app.get("/api/audit")
