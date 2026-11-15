@@ -8,7 +8,8 @@ A Manifest V3 Chrome extension that replaces detected sensitive text when pastin
 2. Select this `paste-guard` directory. For an existing installation, click **Reload**.
 3. Reload existing ChatGPT tabs so they receive the new paste handler.
 4. Paste into the chat composer. For example, `Alice Smith: alice@example.com` becomes `Alex Morgan: [EMAIL_1]` in a fresh session.
-5. Open the extension's **Details → Extension options** to add custom terms with categories: Person, Organization, Confidential phrase, or Generic term.
+5. Click the toolbar icon to open the popup: a master on/off switch (applies instantly to every open tab), a session counter, and **Active sites**. ChatGPT is built in; add any other `https://` site and Chrome asks once for permission, after which Paste Guard auto-activates there (guarding any textarea/rich editor on that site). Removing a site releases the permission.
+6. Open the extension's **Details → Extension options** (or **Watchlist & settings** in the popup) to add custom terms with categories: Person, Organization, Confidential phrase, or Generic term.
 
 The bundled `vendor/compromise.js` is included, so loading the extension does not require npm. Aliases depend on prior detections and are reused for the same value during the session. People receive readable names, organizations receive `Example Company N`, and structured secrets receive category labels. If an existing alias also appears literally in a paste that needs that alias, the paste is blocked with an explanation rather than introducing an ambiguous mapping.
 

@@ -1,5 +1,27 @@
 (() => {
-  if (!PG_SITES.includes(location.hostname)) return;
+  // Paste Guard can be injected into an already-open tab (right after a site is
+  // added, or after the extension reloads). Never run twice in the same tab.
+  if (globalThis.__pasteGuardLoaded) return;
+  globalThis.__pasteGuardLoaded = true;
+
+  // Built-in sites use precise chat-box selectors; sites the user added in the
+  // popup use generic ones. (Chrome only injects us on sites in either list.)
+  const builtIn = PG_SITES.includes(location.hostname);
+  const selectors = builtIn ? PG_INPUT_SELECTORS : PG_GENERIC_SELECTORS;
+
+  // Master on/off switch from the popup. Starts "on" so nothing slips through
+  // while the real setting loads, then updates live when the switch is flipped.
+  let active = true;
+  const applyState = (state) => {
+    if (typeof state?.enabled !== "boolean" || !Array.isArray(state.sites)) return;
+    active = state.enabled && (builtIn || state.sites.includes(location.hostname));
+    console.info(`[Paste Guard] ${active ? "Active" : "Paused"} on ${location.hostname}`);
+  };
+  chrome.runtime.sendMessage({ type: "PG_GET_STATE" }).then(applyState, () => {});
+  chrome.runtime.onMessage.addListener((message, sender) => {
+    if (sender.id === chrome.runtime.id && message?.type === "PG_STATE") applyState(message);
+  });
+
   const pending = new WeakSet();
   const revisions = new WeakMap();
   let notice;
@@ -7,7 +29,7 @@
   function findChatInput(target) {
     const el = target instanceof Element ? target : target?.parentElement;
     if (!el) return null;
-    for (const selector of PG_INPUT_SELECTORS) {
+    for (const selector of selectors) {
       const match = el.closest(selector);
       if (match && (match instanceof HTMLTextAreaElement || match.isContentEditable)) return match;
     }
@@ -98,6 +120,10 @@
   }, true);
 
   window.addEventListener("paste", (event) => {
+    if (!active) return; // switched off: let the site handle the paste normally
+    // The extension was reloaded and this copy is stale. Step aside so the
+    // freshly injected copy handles the paste instead of showing an error.
+    if (!chrome.runtime?.id) return;
     const input = findChatInput(event.target);
     if (!input || !event.clipboardData?.types.includes("text/plain")) return;
     // Must happen synchronously, BEFORE waiting on the worker. Neither the
