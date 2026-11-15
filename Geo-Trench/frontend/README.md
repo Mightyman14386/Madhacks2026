@@ -118,3 +118,42 @@ Connections are sorted unsafe first, then by `id`. `/api/audit` returns a newest
 - **Don't overlap polls.** The first poll can take ~600 ms, and some later ones are slower while the process cache refreshes. Wait for each request to finish before starting the next.
 - **Simulated threats are labelled.** `is_simulated: true` (negative PIDs) marks demo threats; quarantining them is always a dry run.
 - **CORS only allows `http://localhost:5173`.**
+
+## Interactive dashboard
+
+The frontend now provides a dark network observatory centered on a rotatable country-outline globe. It uses locally bundled D3 geographic projections and World Atlas 110m country boundaries (Natural Earth data). DM Sans and Space Grotesk fonts are bundled locally through Fontsource; no map service, API key, or runtime font CDN is required.
+
+### Controls and views
+
+- Drag the globe to rotate, or focus it and use arrow keys. Use the + / - buttons (or keys) to zoom. Rotate toggles automatic rotation; Reset restores the initial view. Reduced-motion preferences disable automatic movement and route particles.
+- Select a glowing destination or a connection row to focus the globe and inspect backend findings, process ancestry, protection status, and endpoint details.
+- Search by process, provider, country, or IP. Press / outside an input to focus search. Filter by backend-reported safe or unsafe status.
+- Latest check shows the current snapshot. Session · 15m retains up to 2,000 observed connection IDs in memory for fifteen minutes while this page is open. Each record retains the origin from its observation. This is not persisted backend history.
+- Activity shows the audit feed, with navigation to connections that are still in the latest snapshot. Pause stops connection and audit updates; it does not stop network traffic or backend enforcement.
+- Anycast endpoints and missing coordinates are not assigned fabricated locations. A separate panel shows anycast endpoints, and map counts disclose unlocated connections.
+- Export view downloads the filtered connection view as JSON. Executable paths and ancestry_detail are omitted; IP addresses and other visible endpoint metadata are included.
+- Explore demo uses explicitly labeled synthetic TEST-NET endpoints, distinct from backend observations. The frontend cannot submit security actions in this mode.
+
+### Backend safety and availability
+
+All API calls stay in src/api.js. Connections, audit, and health use independent sequential polling loops with abort-on-unmount and request timeouts. A new request in a loop is scheduled only after the previous one finishes. Backend errors show a banner and preserve the last snapshot with its last-check time. Warnings, GeoIP fallback mode, truncation, administrator status, and enforcement mode are visible.
+
+Quarantine requires a confirmation dialog and submits only {conn_id}. The frontend handles protected-process 403 Safety Override, 404 unavailable/closed connection, 409 conflict, 422 invalid request, backend failures, and simulated successes. Cosmetic locks do not authorize or prevent server-side checks.
+
+At implementation time, backend/server.py does NOT register /api/quarantine or /api/quarantine/list, although the contract above describes them. The frontend includes their integration and reports unavailable endpoints honestly. No backend enforcement or filesystem behavior was added. Planned geofence, restore, and agent APIs are not called or exposed as working controls.
+
+Routes show the relationship between the device origin and an approximate remote location. The API does not contain measured traffic direction or physical network paths. Moving route particles are illustrative. Locations can be country-level, especially for cloud/CDN infrastructure.
+
+### Verification
+
+```powershell
+npm test
+npm run build
+# In another terminal, keep npm run dev running at http://localhost:5173
+npx playwright install chromium
+npm run test:browser
+```
+
+If the repository's Paste Guard test browser is already present, the browser runner reuses it; otherwise install Chromium as above or set PLAYWRIGHT_BROWSERS_PATH. Playwright is development-only.
+
+Unit tests cover coordinate validation, stable history updates, expiration, and bounds. Browser tests use synthetic API fixtures (not live security actions) and cover desktop/mobile layout, globe controls, selection, filtering, warnings, missing coordinates, export, unavailable endpoints, quarantine response statuses, demo action restrictions, backend outages, and non-overlapping polls. Screenshots are written to ignored test-results/.
