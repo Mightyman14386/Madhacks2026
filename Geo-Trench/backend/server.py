@@ -15,6 +15,7 @@ import connections
 import db
 import geo
 import geofence
+import incidents
 import quarantine
 import scenarios
 
@@ -130,6 +131,10 @@ async def lifespan(app: FastAPI):
         with suppress(asyncio.CancelledError, Exception):
             await sync_task
         _cleanup_on_exit("server shutdown")
+        try:
+            incidents.incident_feed.close()
+        except Exception:
+            log.exception("Incident feed close failed")
         db.close()
         geo.close()
 
@@ -252,3 +257,10 @@ def audit(limit: int = 50):
 @app.get("/api/scenarios/test")
 def scenarios_test():
     return [ancestry.public_view(c) for c in scenarios.get_planted_connections()]
+
+
+@app.get("/api/incidents")
+def get_incidents():
+    snapshot = incidents.incident_feed.snapshot()
+    status = 503 if snapshot["state"] == "error" and snapshot["fetched_at"] is None else 200
+    return JSONResponse(status_code=status, content=snapshot)

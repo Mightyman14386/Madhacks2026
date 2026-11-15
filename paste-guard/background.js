@@ -1,4 +1,4 @@
-importScripts("config.js", "vendor/compromise.js", "detector.js", "lab.js");
+importScripts("config.js", "vendor/compromise.js", "vendor/names.js", "names.js", "detector.js", "lab.js");
 
 // One worker owns the vault. Queue initialization, allocation and persistence
 // together so concurrent tabs cannot assign the same alias to different values.

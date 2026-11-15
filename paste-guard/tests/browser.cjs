@@ -250,8 +250,8 @@ async function run() {
     assert.ok(!JSON.stringify(report).includes('Alice'));
     passed('Privacy Lab explains exceptions and exports only counts');
     await lab.locator('#run-checks').click();
-    await lab.waitForFunction(()=>document.querySelector('#check-summary').textContent.startsWith('10 / 10'));
-    assert.equal(await lab.locator('.check').count(),10);
+    await lab.waitForFunction(()=>document.querySelector('#check-summary').textContent.startsWith('11 / 11'));
+    assert.equal(await lab.locator('.check').count(),11);
     passed('bundled diagnostic runs the actual detector');
     await lab.locator('#destination').fill('chatgpt.com');
     assert.equal(await lab.locator('#results').isVisible(),false);
@@ -299,6 +299,25 @@ async function run() {
     passed('popup has spaced cards and a single settings destination');
     await popup.close();
 
+
+
+    await options.reload();
+    await options.waitForFunction(()=>!document.querySelector('#fields').disabled);
+    await options.locator('#never-sites').getByRole('button',{name:'Remove chatgpt.com',exact:true}).click();
+    await options.waitForFunction(()=>!document.querySelector('#never-sites').textContent.includes('chatgpt.com'));
+    await page.goto('https://chatgpt.com/text');
+    await selectText(page,0,21);
+    await paste(page,'Raghav met Stavan. Raghav left.');
+    await page.waitForFunction(()=>!document.querySelector('#prompt-textarea').value.includes('Raghav'));
+    const broadNames=await page.locator('#prompt-textarea').inputValue();
+    assert.ok(!broadNames.includes('Stavan'));
+    assert.match(broadNames,/^(.+) met (.+)\. \1 left\.$/);
+    passed('bundled dictionary redacts Raghav and Stavan without manual rules and reuses aliases');
+    await page.goto('https://chatgpt.com/text');
+    await selectText(page,0,21);
+    await paste(page,'May I send the report? Will you send the meeting notes?');
+    await page.waitForFunction(()=>document.querySelector('#prompt-textarea').value==='May I send the report? Will you send the meeting notes?');
+    passed('expanded name vocabulary preserves ambiguous common-word prose');
 
 const vaultAccess = await page.evaluate(async () => {
       // The page itself has no extension storage API.

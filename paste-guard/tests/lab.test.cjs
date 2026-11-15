@@ -7,7 +7,7 @@ test('analysis explains rules without writing vault or leaking raw data in repor
  const r=await b.send({type:'PG_ANALYZE',text:'Alice Smith: alice@example.com'},true);
  assert.equal(r.ok,true);assert.equal(r.sanitized,'Alex Morgan: alice@example.com');assert.equal(r.baseline,'Alex Morgan: [EMAIL_1]');
  assert.equal(r.findings.find(f=>f.type==='EMAIL').action,'keep');
- assert.equal(r.findings.find(f=>f.type==='PERSON').source,'name');
+ assert.equal(r.findings.find(f=>f.type==='PERSON').source,'dictionary');
  assert.equal(b.state.session.pgVaultV2,undefined);
  assert.equal(JSON.stringify(r.report).includes('Alice'),false);assert.equal(JSON.stringify(r.report).includes('example.com'),false);
  assert.equal((await b.sanitize('Bob Jones')).sanitized,'Alex Morgan');
@@ -27,7 +27,7 @@ test('web pages cannot call the lab or obtain original findings',async()=>{
 });
 test('built-in diagnostic uses clean rules and returns explicit expectations',async()=>{
  const b=boot();await b.watchlist(['Please']);const r=await b.send({type:'PG_RUN_CHECKS'},true);
- assert.equal(r.ok,true);assert.equal(r.total,10);assert.equal(r.passed,10);assert.equal(b.state.session.pgVaultV2,undefined);
+ assert.equal(r.ok,true);assert.equal(r.total,11);assert.equal(r.passed,11);assert.equal(b.state.session.pgVaultV2,undefined);
 });
 test('analysis rejects oversized input and preserves HTML as inert text',async()=>{
  const b=boot();assert.equal((await b.send({type:'PG_ANALYZE',text:'x'.repeat(100001)},true)).ok,false);

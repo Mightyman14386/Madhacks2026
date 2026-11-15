@@ -19,7 +19,24 @@ elsewhere, copy `.env.example` to `.env`, set `VITE_API_URL`, and restart `npm r
 
 All API calls live in `src/api.js`.
 
+## Databricks incident globe
+
+The overview defaults to **Databricks incidents**. Configure the backend OAuth
+credentials using [the Databricks setup guide](../backend/DATABRICKS.md). Each row
+supplies its own source and destination coordinates. Severity determines the arc
+color; repeated routes receive small stable offsets. Search by IP or description,
+filter severity, and select a row for details. The globe draws up to 180 routes,
+including the selected incident, while the list covers the full loaded snapshot.
+
+GET /api/incidents is polled every 3 seconds; the backend caches results and queries
+the warehouse at most every 30 seconds by default while clients poll.
+
+**Device traffic** retains the existing local monitoring and quarantine workflow.
+Activity and Quarantine tabs refer to device monitoring, not Databricks incidents.
+
 ---
+
+
 
 ## Backend API contract
 
@@ -29,7 +46,7 @@ All API calls live in `src/api.js`.
 
 | Request | Suggested interval | Powers |
 |---|---|---|
-| `GET /api/connections` | every 2–3 s | Globe arcs, threat list, stats bar, anycast panel (the main feed) |
+| `GET /api/connections` | every 2–3 s | Globe arcs, threat list, stats bar, anycast panel (Device traffic view) |
 | `GET /api/audit?limit=50` | every 3–5 s | Event ticker |
 | `GET /api/health` | on load, then ~30 s | Status badge (admin, enforcing vs dry-run, GeoIP live/fallback) and "backend down" banner |
 

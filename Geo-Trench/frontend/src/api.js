@@ -1,3 +1,4 @@
+import {validateIncidentSnapshot} from "./incidentSnapshot.js";
 // Backend owns every security decision. Actions send stable IDs only.
 export const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 export class ApiError extends Error {
@@ -27,3 +28,5 @@ export const getConnections=signal=>request("/api/connections",{signal});
 export const getAudit=signal=>request("/api/audit?limit=50",{signal});
 export const getQuarantine=signal=>request("/api/quarantine/list",{signal});
 export const quarantineConnection=id=>request("/api/quarantine",{method:"POST",body:JSON.stringify({conn_id:id})});
+
+export const getIncidents=async signal=>validateIncidentSnapshot(await request("/api/incidents",{signal}));
