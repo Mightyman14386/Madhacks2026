@@ -110,6 +110,11 @@ def _migrate(c):
     if "restored_at" not in cols:
         c.execute("ALTER TABLE quarantine_manifest ADD COLUMN restored_at TEXT")
 
+    # Databricks export bookkeeping: NULL = not yet sent.
+    tf_cols = {r["name"] for r in c.execute("PRAGMA table_info(threat_findings)")}
+    if "exported_at" not in tf_cols:
+        c.execute("ALTER TABLE threat_findings ADD COLUMN exported_at TEXT")
+
     # Step 8B geofence fields. Fixed statements only (no interpolation).
     geo_cols = {r["name"] for r in c.execute("PRAGMA table_info(geofence_log)")}
     for name, stmt in (
@@ -266,6 +271,44 @@ def get_recent_findings_for(process_name=None, remote_ip=None):
         "first_seen": row["first_seen"],
         "last_seen": row["last_seen"],
     }
+
+
+def get_unexported_findings(limit, include_simulated, only_unexported=True, offset=0):
+    """Oldest-first findings for the Databricks export. only_unexported=False pages through ALL findings
+    (the reconcile scan); the warehouse then inserts only rows it doesn't already have."""
+    sql = ("SELECT * FROM threat_findings WHERE 1 = 1"
+           + (" AND exported_at IS NULL" if only_unexported else "")
+           + ("" if include_simulated else " AND is_simulated = 0")
+           + " ORDER BY id LIMIT ? OFFSET ?")  # fixed fragments only; values are bound
+    with _lock:
+        rows = _rows(_db().execute(sql, (int(limit), int(offset))))
+    for r in rows:
+        for key in ("ancestry_json", "rules_json", "reasons_json"):
+            try:
+                r[key[:-5]] = json.loads(r.pop(key) or "[]")
+            except ValueError:
+                r[key[:-5]] = []
+    return rows
+
+
+def count_unexported_findings(include_simulated):
+    sql = ("SELECT COUNT(*) FROM threat_findings WHERE exported_at IS NULL"
+           + ("" if include_simulated else " AND is_simulated = 0"))
+    with _lock:
+        return _db().execute(sql).fetchone()[0]
+
+
+def mark_findings_exported(conn_ids, stamp=None):
+    """Stamp findings as sent (stamp may be e.g. 'skipped:<ts>' for rows that can't be exported)."""
+    ids = [str(i) for i in conn_ids or []]
+    if not ids:
+        return 0
+    with _lock:
+        c = _db()
+        cur = c.executemany("UPDATE threat_findings SET exported_at = ? WHERE conn_id = ?",
+                            [(stamp or _now(), i) for i in ids])
+        c.commit()
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------- geofence

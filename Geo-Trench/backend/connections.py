@@ -16,6 +16,7 @@ import psutil
 
 import ancestry
 import config
+import databricks_export
 import db
 import geo
 import quarantine_guards
@@ -283,6 +284,7 @@ def get_snapshot():
                 "id": cid, "pid": rec["pid"], "process_name": rec["process_name"],
                 "remote_ip": rec["remote_ip"], "remote_port": rec["remote_port"],
                 "country_code": (g or {}).get("country_code"), "city": (g or {}).get("city"),
+                "lat": (g or {}).get("lat"), "lng": (g or {}).get("lng"),  # used by databricks_export only
                 "asn_org": (g or {}).get("asn_org"),
                 "ancestry": rec["ancestry"],
                 "rules_fired": verdict["rules_fired"], "reasons": verdict["reasons"],
@@ -321,12 +323,18 @@ def get_snapshot():
 
     try:
         for f in findings:
-            db.upsert_finding(f)
+            if db.upsert_finding(f):  # True only on first sight -> export once
+                databricks_export.enqueue(f)
     except Exception as e:
         log.warning("Could not record findings: %s", e)
         warnings.append("Could not record threat findings to the database.")
 
     connections.sort(key=lambda c: (c["status"] != "unsafe", c["id"]))
+    try:
+        # Mirror every route the device globe draws into Databricks (same origin + GeoIP point).
+        databricks_export.observe_connections(connections, geo.get_origin())
+    except Exception as e:
+        log.warning("Could not queue connections for Databricks export: %s", type(e).__name__)
     anycast.sort(key=lambda c: (c["status"] != "unsafe", c["id"]))
 
     unsafe_count = sum(1 for c in connections if c["status"] == "unsafe")

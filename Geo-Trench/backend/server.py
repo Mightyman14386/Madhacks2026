@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 import ancestry
 import config
 import connections
+import databricks_export
 import db
 import geo
 import geofence
@@ -122,6 +123,7 @@ async def lifespan(app: FastAPI):
     atexit.register(geofence.atexit_sweep)  # last resort: firewall rules only
     log.info("Exit cleanup armed: GeoTrench firewall rules are removed when the server stops")
 
+    databricks_export.start()  # no-op unless DATABRICKS_EXPORT_ENABLED
     sync_task = asyncio.create_task(_geofence_sync_loop())
     log.info("Geofence sync running every %ss", config.GEOFENCE_SYNC_SECONDS)
     try:
@@ -131,6 +133,7 @@ async def lifespan(app: FastAPI):
         with suppress(asyncio.CancelledError, Exception):
             await sync_task
         _cleanup_on_exit("server shutdown")
+        await asyncio.to_thread(databricks_export.stop)  # stop worker + one short final flush
         try:
             incidents.incident_feed.close()
         except Exception:
@@ -159,6 +162,7 @@ def health():
         "enforcement_enabled": enforcement_enabled(),
         "geoip_loaded": geo.readers_loaded(),
         "geoip_fallback": geo.geoip_is_fallback,
+        "databricks_export": databricks_export.export_state(),
     }
 
 
