@@ -1,6 +1,12 @@
+backend/data/ranges_*.json
+data/ranges_*.json
 backend/data/*.mmdb
 backend/.env
 backend/geotrench.db
+backend/geotrench.db-wal
+backend/geotrench.db-shm
 node_modules/
+frontend/dist/
+frontend/.env
 venv/
 __pycache__/

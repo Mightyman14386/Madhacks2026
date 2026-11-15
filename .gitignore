@@ -1,6 +1,6 @@
 */node_modules/
 paste-guard/test-results/
-Geo-Trench/backend/data/*.mmdb
 Geo-Trench/backend/.env
 Geo-Trench/backend/geotrench.db
 Geo-Trench/venv/
+Geo-Trench/backend/logs/

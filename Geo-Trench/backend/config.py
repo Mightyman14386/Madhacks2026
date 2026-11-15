@@ -42,11 +42,30 @@ def _path(name: str, default: str) -> Path:
 
 DEMO_MODE: bool = _bool("DEMO_MODE", True)
 ENFORCE_FIREWALL: bool = _bool("ENFORCE_FIREWALL", False)
-RULE_TTL_MINUTES: int = _int("RULE_TTL_MINUTES", 30)
+RULE_TTL_MINUTES: float = _float("RULE_TTL_MINUTES", 30.0)  # float so 1 or 0.5 works for testing
 MAXMIND_CITY_PATH: Path = _path("MAXMIND_CITY_PATH", "data/GeoLite2-City.mmdb")
 MAXMIND_ASN_PATH: Path = _path("MAXMIND_ASN_PATH", "data/GeoLite2-ASN.mmdb")
 ORIGIN_LAT: float = _float("ORIGIN_LAT", 43.0731)
 ORIGIN_LNG: float = _float("ORIGIN_LNG", -89.4012)
+
+
+def _csv(name: str) -> tuple:
+    raw = os.getenv(name) or ""
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+# Firewall / geofence
+KILL_ON_GEOFENCE: bool = _bool("KILL_ON_GEOFENCE", False)  # not implemented; connection reset replaces it
+RESET_CONNECTIONS_ON_GEOFENCE: bool = _bool("RESET_CONNECTIONS_ON_GEOFENCE", True)
+GEOFENCE_SYNC_SECONDS: float = _float("GEOFENCE_SYNC_SECONDS", 5.0)
+NEVER_BLOCK_HOSTS: tuple = _csv("NEVER_BLOCK_HOSTS")
+MAX_IPS_PER_RULE: int = _int("MAX_IPS_PER_RULE", 500)
+FIREWALL_CHUNK_SIZE: int = _int("FIREWALL_CHUNK_SIZE", 1000)
+MAX_COUNTRY_RULES: int = _int("MAX_COUNTRY_RULES", 50)
+FIREWALL_RULE_PREFIX = "GeoTrench-"
+FIREWALL_RULE_GROUP = "GeoTrench"
+DATABRICKS_HOST: str = (os.getenv("DATABRICKS_HOST") or "").strip()
+
 DB_PATH: Path = _path("DB_PATH", "geotrench.db")
 RETENTION_DAYS: int = _int("RETENTION_DAYS", 7)
 

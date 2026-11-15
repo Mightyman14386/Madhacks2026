@@ -110,6 +110,19 @@ def _migrate(c):
     if "restored_at" not in cols:
         c.execute("ALTER TABLE quarantine_manifest ADD COLUMN restored_at TEXT")
 
+    # Step 8B geofence fields. Fixed statements only (no interpolation).
+    geo_cols = {r["name"] for r in c.execute("PRAGMA table_info(geofence_log)")}
+    for name, stmt in (
+        ("ip_count", "ALTER TABLE geofence_log ADD COLUMN ip_count INT"),
+        ("mode", "ALTER TABLE geofence_log ADD COLUMN mode TEXT"),
+        ("expires_at", "ALTER TABLE geofence_log ADD COLUMN expires_at TEXT"),
+        ("source", "ALTER TABLE geofence_log ADD COLUMN source TEXT"),
+        ("scope", "ALTER TABLE geofence_log ADD COLUMN scope TEXT"),
+        ("range_count", "ALTER TABLE geofence_log ADD COLUMN range_count INT"),
+    ):
+        if name not in geo_cols:
+            c.execute(stmt)
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -261,21 +274,42 @@ def geofence_version():
     return _geofence_version
 
 
-def append_geofence_event(action, country_code, ips, rule_name, enforced, command, note):
+def append_geofence_event(action, country_code, ips, rule_name, enforced, command, note,
+                          ip_count=None, mode=None, expires_at=None, source=None,
+                          scope=None, range_count=None):
+    """Append one geofence event and bump geofence_version (invalidates readers' caches).
+    ips must be public remote IPs only (never local, gateway, or DNS addresses)."""
     global _geofence_version
     if action not in ("block", "unblock"):
         raise ValueError(f"invalid geofence action: {action!r}")
+    ips = list(ips or [])
     with _lock:
         c = _db()
         cur = c.execute(
-            "INSERT INTO geofence_log (ts, action, country_code, ips_json, rule_name, enforced, command, note) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (_now(), action, str(country_code).strip().upper(), json.dumps(list(ips or [])),
-             rule_name, 1 if enforced else 0, command, note),
+            "INSERT INTO geofence_log (ts, action, country_code, ips_json, rule_name, enforced, command, note, "
+            "ip_count, mode, expires_at, source, scope, range_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (_now(), action, str(country_code).strip().upper(), json.dumps(ips),
+             rule_name, 1 if enforced else 0, command, note,
+             len(ips) if ip_count is None else ip_count, mode, expires_at, source, scope, range_count),
         )
         c.commit()
         _geofence_version += 1
         return cur.lastrowid
+
+
+def get_active_geofences():
+    """The block row behind each currently active region, oldest first (replayed from geofence_log)."""
+    with _lock:
+        c = _db()
+        active = _replay(c.execute("SELECT id, action, country_code FROM geofence_log ORDER BY id").fetchall())
+        if not active:
+            return []
+        rows = []
+        for row_id in sorted(active.values()):
+            r = c.execute("SELECT * FROM geofence_log WHERE id = ?", (row_id,)).fetchone()
+            if r is not None:
+                rows.append(dict(r))
+    return rows
 
 
 def _replay(rows):
@@ -468,6 +502,8 @@ def get_audit_events(limit=50):
                 "ref_id": r["conn_id"],
             })
         for r in c.execute("SELECT * FROM geofence_log ORDER BY id DESC LIMIT ?", (limit,)):
+            if r["source"] is not None:
+                continue  # user/ttl/startup_sweep/shutdown rows: geofence.py writes a richer audit_log event
             mode = "" if r["enforced"] else " (dry-run)"
             verb = "Blocked traffic to" if r["action"] == "block" else "Unblocked"
             events.append({

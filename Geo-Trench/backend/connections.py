@@ -7,6 +7,7 @@ import hashlib
 import logging
 import ntpath
 import os
+import socket
 import threading
 import time
 from datetime import datetime, timezone
@@ -33,6 +34,11 @@ _first_seen_lock = threading.Lock()
 # Cache of db.get_blocked_regions(): (fetched_monotonic, geofence_version, regions)
 _blocked_cache = None
 _blocked_lock = threading.Lock()
+
+# Cache of the last per-country IP summary: (built_monotonic, {cc: {...}})
+IPS_BY_COUNTRY_TTL_SECONDS = 3.0
+_ips_by_country_cache = None
+_ips_by_country_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------- blocked regions
@@ -177,6 +183,75 @@ def _collect(warnings):
     return candidates
 
 
+def _new_country_entry():
+    return {"real_ips": set(), "real_conn_count": 0, "simulated_conn_count": 0,
+            "country_name": None, "conns": []}
+
+
+def _summarize_by_country():
+    """UNFILTERED per-country view for the geofence sync (blocked countries are included).
+
+    {cc: {"real_ips": set, "real_conn_count": int, "simulated_conn_count": int, "country_name": str|None,
+          "conns": [{local_ip, local_port, remote_ip, remote_port, family}]}}
+
+    - Every socket state with a public remote address counts (SYN_SENT, ESTABLISHED, ...), so blocked
+      connection attempts are noticed.
+    - real_ips excludes simulated connections, anycast/CDN IPs and entries with no country.
+    - "conns" lists real TCP connections only. It holds local addresses, so it is SERVER-SIDE ONLY:
+      used by firewall.reset_tcp_connections and never returned by any API.
+    """
+    out = {}
+    try:
+        raw = psutil.net_connections(kind="inet")
+    except Exception as e:
+        log.warning("Could not list connections for geofence sync: %s", type(e).__name__)
+        raw = []
+    for c in raw:
+        try:
+            if not c.raddr or geo.classify_ip(c.raddr.ip) != "public":
+                continue
+            g = geo.geolocate(c.raddr.ip) or {}
+            cc = (g.get("country_code") or "").upper()
+            if not cc or g.get("anycast") or g.get("lat") is None or g.get("lng") is None:
+                continue
+            entry = out.setdefault(cc, _new_country_entry())
+            entry["country_name"] = entry["country_name"] or g.get("country_name")
+            entry["real_ips"].add(c.raddr.ip)
+            entry["real_conn_count"] += 1
+            if c.type == socket.SOCK_STREAM:
+                entry["conns"].append({
+                    "local_ip": c.laddr.ip, "local_port": c.laddr.port,
+                    "remote_ip": c.raddr.ip, "remote_port": c.raddr.port,
+                    "family": "ipv6" if c.family == socket.AF_INET6 else "ipv4",
+                })
+        except Exception:
+            continue
+
+    try:
+        for p in scenarios.get_planted_connections():
+            cc = ((p.get("geo") or {}).get("country_code") or "").upper()
+            if cc:
+                entry = out.setdefault(cc, _new_country_entry())
+                entry["country_name"] = entry["country_name"] or p["geo"].get("country_name")
+                entry["simulated_conn_count"] += 1
+    except Exception:
+        pass
+    return out
+
+
+def current_ips_by_country():
+    """Per-country remote IPs, unfiltered by geofence. Cached for 3 s. Server-side use only."""
+    global _ips_by_country_cache
+    with _ips_by_country_lock:
+        cached = _ips_by_country_cache
+        if cached is None or time.monotonic() - cached[0] >= IPS_BY_COUNTRY_TTL_SECONDS:
+            cached = (time.monotonic(), _summarize_by_country())
+            _ips_by_country_cache = cached
+        summary = cached[1]
+    return {cc: {**v, "real_ips": set(v["real_ips"]), "conns": [dict(x) for x in v["conns"]]}
+            for cc, v in summary.items()}
+
+
 def get_internal_connection(conn_id):
     """Fresh server-side lookup of one current connection by id, including raw_exe.
 
@@ -233,7 +308,7 @@ def get_snapshot():
             "id": cid, "pid": rec["pid"], "process_name": rec["process_name"],
             "exe": rec["exe"],
             "ancestry": rec["ancestry"], "ancestry_detail": rec["ancestry_detail"],
-            "local_ip": rec["local_ip"], "local_port": rec["local_port"],
+            "local_port": rec["local_port"],  # local_ip is never returned (privacy)
             "remote_ip": rec["remote_ip"], "remote_port": rec["remote_port"],
             "country_code": g.get("country_code"), "country_name": g.get("country_name"),
             "city": g.get("city"), "asn_org": g.get("asn_org"),
