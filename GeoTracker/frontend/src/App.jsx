@@ -76,6 +76,7 @@ export default function App() {
     {!demo&&(feed.error||healthFeed.error)&&<div className="banner error-banner"><Icon name="activity"/> Backend unavailable at {API_URL}. {feed.error||healthFeed.error} {snapshot?"Showing the last received snapshot.":"Start the backend or explore the synthetic demo."}</div>}
     {data?.warnings?.map((warning,i)=><div className="banner warning-banner" key={i}>{typeof warning==="string"?warning:JSON.stringify(warning)}</div>)}
     {data?.truncated&&<div className="banner warning-banner">The backend truncated this snapshot. Counts and visible routes may differ.</div>}
+    {health?.deployment==="hosted"&&!demo&&<div className="banner warning-banner">You are using the hosted learning experience. It cannot monitor or control your computer. Choose Explore demo, or run GeoTracker locally for device monitoring.</div>}
     <LearningGuide item={selectedConnection} mode={mode} stale={!!feed.error}/>
     <div className="stats-grid">{[
      ["CONNECTIONS",stats.total,"Observed in the latest check","globe"],
